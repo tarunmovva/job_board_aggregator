@@ -1,0 +1,43 @@
+# =============================================================================
+# RAILWAY DEPLOYMENT REQUIREMENTS - OPTIMIZED FOR ALL ENDPOINTS
+# =============================================================================
+
+# Core FastAPI server dependencies
+fastapi>=0.95.1
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+
+# HTTP client and API communication
+requests>=2.28.0
+aiohttp>=3.8.0
+
+# AI/LLM services
+groq>=0.30.0
+cerebras_cloud_sdk>=1.46.0
+
+# Vector database and embeddings (Pinecone)
+pinecone>=5.0.0
+
+# Database (Supabase PostgreSQL)
+supabase>=2.0.0
+psycopg2-binary>=2.9.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Date/time handling
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# CLI interface and formatting
+rich>=12.0.0
+
+# Resume parsing (PDF, DOCX, TXT)
+pdfminer.six>=20221105
+python-docx>=0.8.11
+
+# Data validation and models
+pydantic>=1.10.0
+
+# Standard library enhancements (for typing)
+typing-extensions>=4.4.0

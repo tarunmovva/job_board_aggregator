@@ -1,0 +1,28 @@
+# Core production dependencies
+requests>=2.28.0
+rich>=12.0.0
+typing-extensions>=4.4.0
+pinecone>=5.0.0
+pdfminer.six>=20221105
+python-docx>=0.8.11
+python-dotenv>=1.0.0
+pytz>=2023.3
+supabase>=2.0.0
+psycopg2-binary>=2.9.0
+python-multipart>=0.0.6
+python-dateutil>=2.8.0
+
+# Required for async Groq API client
+aiohttp>=3.8.0
+
+# AI/LLM services for false positive detection
+groq>=0.30.0
+cerebras_cloud_sdk>=1.46.0
+
+# Legacy ML dependencies (no longer used in production)
+# These were used by the old EmbeddingGenerator class
+# transformers>=4.30.0
+# peft>=0.6.0
+# torch>=1.13.0
+# numpy>=1.23.0
+# scikit-learn>=1.0.0
