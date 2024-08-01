@@ -1,0 +1,1 @@
+"""Utility functions for job board aggregator.""" 
