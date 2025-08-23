@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+
+# Database
+*.sqlite
+*.db
+
+# API Keys and secrets
+config/secrets.json
+secrets.json
+
+# Test output
+.coverage
+htmlcov/
+.pytest_cache/
+.cache
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+last_fetch.json
+last_fetch_backup.json
+companies_export.csv
+companies_updated.csv
+job_aggregator.log
+*.json.backup
+
+# Test results and analysis files
+*_results.json
+*_performance.json
+*_analysis.py
