@@ -78,3 +78,6 @@ job_aggregator.log
 *_results.json
 *_performance.json
 *_analysis.py
+
+# Vercel deployment files
+.vercel/
