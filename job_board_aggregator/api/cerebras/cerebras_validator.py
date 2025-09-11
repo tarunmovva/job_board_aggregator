@@ -265,10 +265,20 @@ class CerebrasSchemaValidator:
                 }
                 logger.debug(f"Using strict schema for {model_config.display_name}")
             
-            # Make API call
+            # Make API call with appropriate messages
+            if self.use_json_mode:
+                # Use system message to enforce JSON format in JSON mode
+                messages = [
+                    {"role": "system", "content": "You are a JSON API. You must respond only with valid JSON objects. Never include explanations, analysis, or any text outside the JSON structure."},
+                    {"role": "user", "content": prompt}
+                ]
+            else:
+                # Schema mode handles format enforcement automatically
+                messages = [{"role": "user", "content": prompt}]
+            
             response = client.chat.completions.create(
                 model=model_config.name,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 temperature=0.7,
                 max_completion_tokens=1000,
                 response_format=response_format
@@ -287,13 +297,20 @@ class CerebrasSchemaValidator:
             # Log raw content for debugging (first 200 chars)
             logger.debug(f"Raw response from {model_config.display_name}: {content[:200]}...")
             
-            # Parse JSON response
+            # Parse JSON response with fallback extraction
             try:
                 parsed_result = json.loads(content)
             except json.JSONDecodeError as json_error:
-                logger.error(f"JSON decode error for {model_config.display_name} batch {batch_idx}: {json_error}")
-                logger.error(f"Raw content that failed parsing: {content[:500]}")
-                return self._create_error_result(model_config, batch_idx, job_batch, f"JSON decode error: {json_error}")
+                # Try to extract JSON from mixed content
+                logger.warning(f"Initial JSON parse failed for {model_config.display_name}, attempting extraction...")
+                parsed_result = self._extract_json_from_text(content)
+                
+                if parsed_result is None:
+                    logger.error(f"JSON decode error for {model_config.display_name} batch {batch_idx}: {json_error}")
+                    logger.error(f"Raw content that failed parsing: {content[:500]}")
+                    return self._create_error_result(model_config, batch_idx, job_batch, f"JSON decode error: {json_error}")
+                else:
+                    logger.info(f"Successfully extracted JSON from mixed content for {model_config.display_name}")
             
             # Extract flagged URLs with fallback parsing
             flagged_urls = self._extract_flagged_urls(parsed_result, model_config.display_name)
@@ -323,6 +340,55 @@ class CerebrasSchemaValidator:
             "jobs_processed": len(job_batch),
             "success": False
         }
+    
+    def _extract_json_from_text(self, text: str) -> Optional[Dict]:
+        """Extract JSON object from text that may contain additional content."""
+        import re
+        
+        # Try to find JSON object patterns
+        json_patterns = [
+            r'\{[^{}]*"flagged_job_urls"[^{}]*\}',  # Simple pattern
+            r'\{[^{}]*"flagged_job_urls"[^{}]*(?:\[[^\]]*\])[^{}]*\}',  # With array
+            r'\{(?:[^{}]|{[^{}]*})*\}',  # Nested braces
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, text, re.DOTALL)
+            for match in matches:
+                try:
+                    # Try to parse each potential JSON match
+                    parsed = json.loads(match)
+                    if isinstance(parsed, dict) and "flagged_job_urls" in parsed:
+                        logger.info(f"Extracted valid JSON from text using pattern: {pattern[:30]}...")
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+        
+        # If no pattern works, try to find array patterns and construct JSON
+        array_patterns = [
+            r'"flagged_job_urls":\s*\[([^\]]*)\]',
+            r'"flagged_job_urls":\s*\[\s*\]',  # Empty array
+        ]
+        
+        for pattern in array_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    # Construct a simple JSON object with the found array
+                    if pattern.endswith(r'\[\s*\]'):  # Empty array pattern
+                        constructed_json = '{"flagged_job_urls": []}'
+                    else:
+                        array_content = match.group(1)
+                        constructed_json = f'{{"flagged_job_urls": [{array_content}]}}'
+                    
+                    parsed = json.loads(constructed_json)
+                    logger.info(f"Constructed valid JSON from array pattern")
+                    return parsed
+                except json.JSONDecodeError:
+                    continue
+        
+        logger.warning(f"Could not extract valid JSON from text: {text[:200]}...")
+        return None
     
     def _extract_flagged_urls(self, parsed_result: Dict, model_name: str) -> List[str]:
         """Extract flagged URLs from parsed JSON with fallback parsing."""
@@ -434,19 +500,21 @@ EVALUATION RULES:
 - Don't flag for minor skill gaps that can be learned
 - Be CONSERVATIVE: When uncertain, do NOT flag
 
-Return ONLY job URLs that represent clear role mismatches.
+YOU MUST RESPOND ONLY WITH VALID JSON. NO OTHER TEXT ALLOWED.
 
-IMPORTANT: Respond with a valid JSON object in this exact format:
+Return ONLY job URLs that represent clear role mismatches in this exact JSON format:
+
 {{
   "flagged_job_urls": ["url1", "url2", "url3"]
 }}
 
 If no jobs should be flagged, return:
+
 {{
   "flagged_job_urls": []
 }}
 
-Do not include any additional text or explanation outside the JSON."""
+CRITICAL: Your response must be valid JSON only. Do not include any explanations, analysis, or other text outside the JSON object."""
 
         return prompt
 
