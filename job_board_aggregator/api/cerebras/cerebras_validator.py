@@ -437,14 +437,14 @@ EVALUATION RULES:
 Return ONLY job URLs that represent clear role mismatches.
 
 IMPORTANT: Respond with a valid JSON object in this exact format:
-{
+{{
   "flagged_job_urls": ["url1", "url2", "url3"]
-}
+}}
 
 If no jobs should be flagged, return:
-{
+{{
   "flagged_job_urls": []
-}
+}}
 
 Do not include any additional text or explanation outside the JSON."""
 
