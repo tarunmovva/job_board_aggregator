@@ -48,7 +48,7 @@ class CerebrasSchemaValidator:
         self.resume_max_chars = int(os.getenv('CEREBRAS_RESUME_MAX_CHARS', '15000'))
         self.require_unanimous = os.getenv('CEREBRAS_REQUIRE_UNANIMOUS', 'true').lower() == 'true'
         
-        # JSON Schema for enforcing response format
+        # JSON Schema for reference (now using JSON mode for better compatibility)
         self.response_schema = {
             "type": "object",
             "properties": {
@@ -62,7 +62,13 @@ class CerebrasSchemaValidator:
             "additionalProperties": False
         }
         
+        # Use JSON mode instead of strict schema for better compatibility
+        self.use_json_mode = os.getenv('CEREBRAS_USE_JSON_MODE', 'true').lower() == 'true'
+        
         logger.info(f"Initialized CerebrasSchemaValidator with {len(self.available_models)} available models")
+        logger.info(f"Using {'JSON mode' if self.use_json_mode else 'strict schema mode'} for responses")
+        logger.info(f"Max jobs per batch: {self.max_jobs_per_batch}")
+        logger.info(f"Require unanimous consensus: {self.require_unanimous}")
     
     def _load_api_key(self) -> str:
         """Load Cerebras API key from environment."""
@@ -146,7 +152,8 @@ class CerebrasSchemaValidator:
                 "batches_processed": len(job_batches),
                 "batch_details": batch_metadata,
                 "false_positives_removed": len(all_false_positives),
-                "schema_enforced": True,
+                "response_method": "json_mode" if self.use_json_mode else "schema_mode",
+                "schema_enforced": not self.use_json_mode,  # Only true when using strict schema
                 "require_unanimous": self.require_unanimous
             }
             
@@ -233,7 +240,7 @@ class CerebrasSchemaValidator:
     
     def _validate_with_single_model(self, model_config: ModelConfig, job_batch: List[Dict], 
                                    resume_text: str, batch_idx: int) -> Dict[str, Any]:
-        """Validate a batch of jobs with a single Cerebras model using schema enforcement."""
+        """Validate a batch of jobs with a single Cerebras model using JSON mode or schema enforcement."""
         
         try:
             # Import here to avoid circular imports and ensure it's available
@@ -243,13 +250,12 @@ class CerebrasSchemaValidator:
             
             prompt = self._create_validation_prompt(job_batch, resume_text, model_config.display_name, batch_idx)
             
-            # Make API call with strict schema enforcement
-            response = client.chat.completions.create(
-                model=model_config.name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_completion_tokens=1000,
-                response_format={
+            # Choose response format based on configuration
+            if self.use_json_mode:
+                response_format = {"type": "json_object"}
+                logger.debug(f"Using JSON mode for {model_config.display_name}")
+            else:
+                response_format = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "false_positive_detection",
@@ -257,32 +263,87 @@ class CerebrasSchemaValidator:
                         "schema": self.response_schema
                     }
                 }
+                logger.debug(f"Using strict schema for {model_config.display_name}")
+            
+            # Make API call
+            response = client.chat.completions.create(
+                model=model_config.name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_completion_tokens=1000,
+                response_format=response_format
             )
             
-            # Parse response - schema guarantees proper format
+            # Validate response exists
+            if not response or not response.choices:
+                logger.error(f"Empty response from {model_config.display_name} batch {batch_idx}")
+                return self._create_error_result(model_config, batch_idx, job_batch, "Empty response from API")
+            
             content = response.choices[0].message.content
-            parsed_result = json.loads(content)
+            if not content or content.strip() == "":
+                logger.error(f"Empty content from {model_config.display_name} batch {batch_idx}")
+                return self._create_error_result(model_config, batch_idx, job_batch, "Empty content in response")
+            
+            # Log raw content for debugging (first 200 chars)
+            logger.debug(f"Raw response from {model_config.display_name}: {content[:200]}...")
+            
+            # Parse JSON response
+            try:
+                parsed_result = json.loads(content)
+            except json.JSONDecodeError as json_error:
+                logger.error(f"JSON decode error for {model_config.display_name} batch {batch_idx}: {json_error}")
+                logger.error(f"Raw content that failed parsing: {content[:500]}")
+                return self._create_error_result(model_config, batch_idx, job_batch, f"JSON decode error: {json_error}")
+            
+            # Extract flagged URLs with fallback parsing
+            flagged_urls = self._extract_flagged_urls(parsed_result, model_config.display_name)
             
             return {
                 "model": model_config.name,
                 "model_display": model_config.display_name,
                 "batch_index": batch_idx,
-                "flagged_job_urls": parsed_result["flagged_job_urls"],
+                "flagged_job_urls": flagged_urls,
                 "jobs_processed": len(job_batch),
-                "success": True
+                "success": True,
+                "response_method": "json_mode" if self.use_json_mode else "schema_mode"
             }
             
         except Exception as e:
             logger.error(f"Single model validation failed for {model_config.display_name} batch {batch_idx}: {e}")
-            return {
-                "model": model_config.name,
-                "model_display": model_config.display_name,
-                "batch_index": batch_idx,
-                "flagged_job_urls": [],
-                "error": str(e),
-                "jobs_processed": len(job_batch),
-                "success": False
-            }
+            return self._create_error_result(model_config, batch_idx, job_batch, str(e))
+    
+    def _create_error_result(self, model_config: ModelConfig, batch_idx: int, job_batch: List[Dict], error_msg: str) -> Dict[str, Any]:
+        """Create a standardized error result."""
+        return {
+            "model": model_config.name,
+            "model_display": model_config.display_name,
+            "batch_index": batch_idx,
+            "flagged_job_urls": [],
+            "error": error_msg,
+            "jobs_processed": len(job_batch),
+            "success": False
+        }
+    
+    def _extract_flagged_urls(self, parsed_result: Dict, model_name: str) -> List[str]:
+        """Extract flagged URLs from parsed JSON with fallback parsing."""
+        # Try standard format first
+        if "flagged_job_urls" in parsed_result:
+            urls = parsed_result["flagged_job_urls"]
+            if isinstance(urls, list):
+                return [str(url) for url in urls if url]  # Convert to strings and filter empty
+        
+        # Try alternative formats that might be returned
+        alternative_keys = ["flagged_urls", "false_positives", "removed_jobs", "flagged_jobs"]
+        for key in alternative_keys:
+            if key in parsed_result:
+                urls = parsed_result[key]
+                if isinstance(urls, list):
+                    logger.warning(f"Model {model_name} used alternative key '{key}' instead of 'flagged_job_urls'")
+                    return [str(url) for url in urls if url]
+        
+        # If no valid array found, log and return empty
+        logger.warning(f"Model {model_name} response did not contain valid flagged URLs: {parsed_result}")
+        return []
     
     def _apply_unanimous_consensus(self, validation_results: List[Dict]) -> List[str]:
         """Apply unanimous consensus - both models must agree to flag a job."""
@@ -298,7 +359,8 @@ class CerebrasSchemaValidator:
         # Find intersection - both models must agree
         unanimous_false_positives = model1_flagged & model2_flagged
         
-        logger.info(f"Model 1 flagged: {len(model1_flagged)}, Model 2 flagged: {len(model2_flagged)}, "
+        logger.info(f"Model 1 ({validation_results[0].get('model_display', 'Unknown')}) flagged: {len(model1_flagged)}, "
+                   f"Model 2 ({validation_results[1].get('model_display', 'Unknown')}) flagged: {len(model2_flagged)}, "
                    f"Unanimous: {len(unanimous_false_positives)}")
         
         return list(unanimous_false_positives)
@@ -372,7 +434,19 @@ EVALUATION RULES:
 - Don't flag for minor skill gaps that can be learned
 - Be CONSERVATIVE: When uncertain, do NOT flag
 
-Return ONLY job URLs that represent clear role mismatches. The response will be automatically parsed as JSON."""
+Return ONLY job URLs that represent clear role mismatches.
+
+IMPORTANT: Respond with a valid JSON object in this exact format:
+{
+  "flagged_job_urls": ["url1", "url2", "url3"]
+}
+
+If no jobs should be flagged, return:
+{
+  "flagged_job_urls": []
+}
+
+Do not include any additional text or explanation outside the JSON."""
 
         return prompt
 
