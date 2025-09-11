@@ -29,14 +29,14 @@
 - 🧠 **AI-Enhanced Analysis**: Leverages Groq LLM for intelligent resume enhancement and skill extraction
 - 🔍 **Vector-based Job Search**: Uses Pinecone vector database for semantic similarity matching
 - 🎯 **Precision Filtering**: Advanced filtering by experience level, skills, location, and date ranges
-- 🛡️ **AI Validation**: Cerebras-powered consensus validation to eliminate false positives
+- 🛡️ **AI Validation**: Cerebras-powered consensus validation using enhanced resume for consistency
 - ⚡ **Real-time Results**: Sub-second response times for instant job matching
 
 ### 🚀 **What Makes Us Different**
 
 **🤖 Intelligent Automation**: Our system automatically aggregates jobs from multiple sources every 40 minutes using GitHub Actions, ensuring fresh, up-to-date opportunities.
 
-**🧠 Multi-AI Architecture**: We combine multiple AI models (Groq LLM + Cerebras validation) for superior accuracy and reliability.
+**🧠 Multi-AI Architecture**: We combine multiple AI models (Groq LLM for resume enhancement + Cerebras validation using enhanced resume) for superior accuracy and consistency throughout the pipeline.
 
 **📊 Enterprise-Ready**: Built with FastAPI, featuring robust authentication, comprehensive logging, and production-grade infrastructure.
 
@@ -220,8 +220,8 @@ sequenceDiagram
     Note right of PC: search_with_resume()<br/>similarity + filtering
     PC-->>-FS: 15. Raw job matches (before validation)
     
-    FS->>+CB: 16. Validate matches (false positive detection)
-    Note right of CB: Random 2-model consensus<br/>unanimous agreement required
+    FS->>+CB: 16. Validate matches using ENHANCED RESUME
+    Note right of CB: Random 2-model consensus<br/>uses same enhanced resume<br/>unanimous agreement required
     CB-->>-FS: 17. Filtered results + validation metadata
     
     FS->>FS: 18. Assemble final response with metadata
@@ -230,7 +230,7 @@ sequenceDiagram
     
     Note over GH,SB: Direct Database Connections
     Note right of CLI: CLI directly connects to:<br/>• Supabase for company data<br/>• Pinecone for job storage<br/>• Groq for AI processing
-    Note right of FS: FastAPI connects to:<br/>• Pinecone for job search<br/>• Groq for resume enhancement<br/>• Cerebras for validation
+    Note right of FS: FastAPI connects to:<br/>• Pinecone for job search<br/>• Groq for resume enhancement<br/>• Cerebras for validation using enhanced resume
 ```
 
 ---
@@ -977,6 +977,7 @@ flowchart TD
     
     subgraph "🧠 AI Validation Pipeline"
         V --> W[21. Cerebras Validator]
+        M --> W[Enhanced Resume Input]
         W --> X[22. Random 2-Model Selection]
         X --> Y[23. Parallel Model Validation]
         Y --> Z[24. Unanimous Consensus]
@@ -1041,7 +1042,7 @@ all_results = vector_store.search_with_resume(
 **5. Cerebras Validation** (`cerebras_validator.py`)
 ```python
 false_positive_urls, validation_metadata = await validate_jobs_with_cerebras(
-    all_results, extracted_text
+    all_results, final_resume_text  # Uses enhanced resume for consistency
 )
 filtered_results = [job for job in all_results 
                    if job.get('job_link') not in false_positive_urls]

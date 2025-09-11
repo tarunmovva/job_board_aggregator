@@ -467,9 +467,9 @@ async def match_resume_upload(
                 
                 logger.info(f"Starting Cerebras AI validation for {len(all_results)} jobs")
                 
-                # Run Cerebras validation with random 2-model consensus
+                # Run Cerebras validation with random 2-model consensus using enhanced resume
                 false_positive_urls, validation_metadata = await validate_jobs_with_cerebras(
-                    all_results, extracted_text
+                    all_results, final_resume_text
                 )
                 
                 # Filter out false positives

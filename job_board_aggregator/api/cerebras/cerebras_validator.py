@@ -30,14 +30,17 @@ class CerebrasSchemaValidator:
         self.api_key = self._load_api_key()
         self.timeout = int(os.getenv('CEREBRAS_TIMEOUT_SECONDS', '30'))
         
-        # Available Cerebras models (all 5 tested and verified compatible)
+        # Available Cerebras models (high context length models for better performance)
         # Ordered by performance: qwen-3-coder-480b (0.23s) is fastest
         self.available_models = [
-            ModelConfig("llama-4-scout-17b-16e-instruct", "Llama 4 Scout"),
-            ModelConfig("llama-3.3-70b", "Llama 3.3 70B"),
-            ModelConfig("qwen-3-coder-480b", "Qwen 3 Coder 480B"),
-            ModelConfig("llama-4-maverick-17b-128e-instruct", "Llama 4 Maverick"),
-            ModelConfig("qwen-3-235b-a22b-instruct-2507", "Qwen 3 235B Instruct"),
+            # High context models (65,536 tokens)
+            ModelConfig("llama-3.3-70b", "Llama 3.3 70B", 65536),
+            ModelConfig("qwen-3-coder-480b", "Qwen 3 Coder 480B", 65536),
+            ModelConfig("qwen-3-235b-a22b-thinking-2507", "Qwen 3 235B Thinking", 65536),
+            ModelConfig("qwen-3-32b", "Qwen 3 32B", 65536),
+            ModelConfig("gpt-oss-120b", "GPT OSS 120B", 65536),
+            # High context model (64,000 tokens)
+            ModelConfig("qwen-3-235b-a22b-instruct-2507", "Qwen 3 235B Instruct", 64000),
         ]
         
         # Configuration
@@ -74,7 +77,7 @@ class CerebrasSchemaValidator:
         
         Args:
             job_matches: List of job match dictionaries
-            resume_text: Raw resume text
+            resume_text: Enhanced resume text (optimized by Groq for better semantic matching)
             
         Returns:
             Tuple of (false_positive_urls, validation_metadata)
@@ -300,21 +303,22 @@ class CerebrasSchemaValidator:
         return list(unanimous_false_positives)
     
     def _truncate_resume(self, resume_text: str) -> str:
-        """Truncate resume to fit within token limits."""
+        """Apply minimal truncation to enhanced resume if needed (enhanced resumes are pre-optimized)."""
         if len(resume_text) <= self.resume_max_chars:
             return resume_text
         
-        # Smart truncation at paragraph boundary
+        # Enhanced resumes are already optimized, so minimal truncation should be needed
+        # Smart truncation at paragraph boundary for edge cases
         truncated = resume_text[:self.resume_max_chars]
         last_paragraph = truncated.rfind('\n\n')
         if last_paragraph > self.resume_max_chars * 0.8:
             truncated = truncated[:last_paragraph]
         
-        return truncated + "\n\n[RESUME TRUNCATED FOR API EFFICIENCY]"
+        return truncated + "\n\n[ENHANCED RESUME TRUNCATED FOR API EFFICIENCY]"
     
     def _create_validation_prompt(self, job_batch: List[Dict], resume_text: str, 
                                  model_name: str, batch_idx: int) -> str:
-        """Create validation prompt for schema-enforced false positive detection."""
+        """Create validation prompt for schema-enforced false positive detection using enhanced resume."""
         
         truncated_resume = self._truncate_resume(resume_text)
         
@@ -327,8 +331,8 @@ class CerebrasSchemaValidator:
         
         prompt = f"""You are an expert HR recruiter using {model_name} to identify FALSE POSITIVE job matches based on ROLE COMPATIBILITY.
 
-CANDIDATE RESUME:
-{truncated_resume}
+CANDIDATE RESUME (Enhanced & Optimized):
+{truncated_resume}"
 
 JOBS TO EVALUATE (Batch {batch_idx + 1} - {len(job_batch)} jobs):
 {jobs_text}
@@ -379,7 +383,7 @@ async def validate_jobs_with_cerebras(job_matches: List[Dict], resume_text: str)
     
     Args:
         job_matches: List of job dictionaries with job_link and chunk_text
-        resume_text: Raw resume text
+        resume_text: Enhanced resume text (optimized by Groq for consistent validation)
         
     Returns:
         Tuple of (false_positive_urls, validation_metadata)
