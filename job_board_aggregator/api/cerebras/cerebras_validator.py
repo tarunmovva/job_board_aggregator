@@ -36,7 +36,7 @@ class CerebrasSchemaValidator:
             # High context models (65,536 tokens)
             ModelConfig("llama-3.3-70b", "Llama 3.3 70B", 65536),
             ModelConfig("qwen-3-coder-480b", "Qwen 3 Coder 480B", 65536),
-            ModelConfig("qwen-3-235b-a22b-thinking-2507", "Qwen 3 235B Thinking", 65536),
+            # ModelConfig("qwen-3-235b-a22b-thinking-2507", "Qwen 3 235B Thinking", 65536),
             ModelConfig("qwen-3-32b", "Qwen 3 32B", 65536),
             # ModelConfig("gpt-oss-120b", "GPT OSS 120B", 65536),
             # High context model (64,000 tokens)
@@ -44,7 +44,7 @@ class CerebrasSchemaValidator:
         ]
         
         # Configuration
-        self.max_jobs_per_batch = int(os.getenv('CEREBRAS_MAX_JOBS_PER_BATCH', '290'))
+        self.max_jobs_per_batch = int(os.getenv('CEREBRAS_MAX_JOBS_PER_BATCH', '180'))
         self.resume_max_chars = int(os.getenv('CEREBRAS_RESUME_MAX_CHARS', '15000'))
         self.require_unanimous = os.getenv('CEREBRAS_REQUIRE_UNANIMOUS', 'true').lower() == 'true'
         
@@ -163,14 +163,15 @@ class CerebrasSchemaValidator:
         resume_tokens = len(truncated_resume) // 4  # Rough token estimation
         
         # Calculate tokens available for jobs (leaving buffer for prompt structure)
-        available_tokens_for_jobs = 60000  # Conservative estimate within 65K context
-        estimated_tokens_per_job = 200  # URL + chunk text
+        # Based on analysis: resume ~4000, prompt ~2000, buffer ~1000 = ~7000 overhead
+        available_tokens_for_jobs = 58000  # Conservative estimate within 65K context
+        estimated_tokens_per_job = 305  # Based on actual job data analysis: ~1220 chars / 4
         max_jobs_by_context = available_tokens_for_jobs // estimated_tokens_per_job
         
         # Use the smaller of configured limit or context-based limit
         effective_batch_size = min(self.max_jobs_per_batch, max_jobs_by_context)
         
-        logger.info(f"Batch size: {effective_batch_size} jobs per batch")
+        logger.info(f"Batch size: {effective_batch_size} jobs per batch (context allows {max_jobs_by_context})")
         
         # Create batches
         batches = []
