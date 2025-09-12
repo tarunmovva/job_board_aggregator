@@ -271,7 +271,7 @@ class CerebrasSchemaValidator:
             else:
                 response_format = {"type": "json_object"}
                 messages = [
-                    {"role": "system", "content": "You are a JSON API that ONLY returns JSON objects. You must not provide any explanations, analysis, reasoning, or text outside JSON. Respond with valid JSON only. Maximum 200 tokens. Be extremely concise. No other text is allowed."},
+                    {"role": "system", "content": "You are a JSON API that ONLY returns JSON objects. You must not provide any explanations, analysis, reasoning, or text outside JSON. Respond with valid JSON only. Maximum 500 tokens. Be extremely concise. No other text is allowed."},
                     {"role": "user", "content": prompt}
                 ]
                 logger.debug(f"Using JSON mode for {model_config.display_name}")
@@ -280,7 +280,7 @@ class CerebrasSchemaValidator:
                 model=model_config.name,
                 messages=messages,
                 temperature=0.1,  # Lower temperature for more focused, deterministic responses
-                max_completion_tokens=200,  # Reduced from 1000 to force concise responses
+                max_completion_tokens=500,  # Increased from 200 to prevent JSON truncation with URLs
                 response_format=response_format
             )
             
@@ -378,6 +378,27 @@ class CerebrasSchemaValidator:
     def _extract_json_from_text(self, text: str) -> Optional[Dict]:
         """Extract JSON object from text that may contain additional content."""
         import re
+        
+        # First try direct JSON parse
+        try:
+            parsed = json.loads(text.strip())
+            if isinstance(parsed, dict) and "flagged_job_urls" in parsed:
+                logger.info("Direct JSON parse successful")
+                return parsed
+        except json.JSONDecodeError as e:
+            # Check if this is a truncation error (unterminated string)
+            if "Unterminated string" in str(e):
+                logger.warning(f"Detected truncated JSON response: {str(e)}")
+                # Try to fix truncated JSON by closing incomplete strings and arrays
+                fixed_text = self._fix_truncated_json(text.strip())
+                if fixed_text:
+                    try:
+                        parsed = json.loads(fixed_text)
+                        if isinstance(parsed, dict) and "flagged_job_urls" in parsed:
+                            logger.info("Successfully parsed truncated JSON after repair")
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass
         
         # First try to find any JSON-like structure
         json_patterns = [
@@ -650,6 +671,53 @@ If no jobs should be flagged, return this exact JSON:
 CRITICAL: Your entire response must be ONLY the JSON object above. No additional text, no explanations, no analysis. JSON ONLY."""
 
         return prompt
+
+    def _fix_truncated_json(self, text: str) -> Optional[str]:
+        """Attempt to fix truncated JSON by closing incomplete strings and arrays."""
+        try:
+            # Look for the basic structure and try to complete it
+            if '"flagged_job_urls":' in text:
+                # Find where the array starts
+                array_start = text.find('"flagged_job_urls":')
+                if array_start != -1:
+                    # Find the opening bracket
+                    bracket_start = text.find('[', array_start)
+                    if bracket_start != -1:
+                        # Find the last complete URL (ending with quote and comma)
+                        lines = text.split('\n')
+                        fixed_lines = []
+                        
+                        for line in lines:
+                            # If this line has a complete URL (ends with quote and comma), keep it
+                            if '",' in line and 'http' in line:
+                                fixed_lines.append(line)
+                            # If this line starts the array or object, keep it
+                            elif any(marker in line for marker in ['{', '"flagged_job_urls":', '[']):
+                                fixed_lines.append(line)
+                            # Skip incomplete lines (truncated URLs)
+                        
+                        # Reconstruct the JSON
+                        if fixed_lines:
+                            # Ensure we have proper closing
+                            reconstructed = '\n'.join(fixed_lines)
+                            
+                            # Remove trailing comma if present
+                            if reconstructed.rstrip().endswith(','):
+                                reconstructed = reconstructed.rstrip()[:-1]
+                            
+                            # Add proper closing if needed
+                            if not reconstructed.rstrip().endswith(']'):
+                                reconstructed += '\n  ]\n}'
+                            elif not reconstructed.rstrip().endswith('}'):
+                                reconstructed += '\n}'
+                            
+                            logger.info(f"Reconstructed JSON from {len(lines)} lines to {len(fixed_lines)} complete lines")
+                            return reconstructed
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Error fixing truncated JSON: {e}")
+            return None
 
 
 # Standalone validation function for easy import
