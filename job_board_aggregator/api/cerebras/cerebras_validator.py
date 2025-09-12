@@ -66,7 +66,7 @@ class CerebrasSchemaValidator:
         self.use_json_mode = os.getenv('CEREBRAS_USE_JSON_MODE', 'true').lower() == 'true'
         
         # Models that have issues with JSON mode and should use schema mode
-        self.schema_mode_models = {'qwen-3-32b', 'qwen-3-235b-a22b-thinking-2507'}  # Add problematic models here
+        self.schema_mode_models = {'qwen-3-32b', 'qwen-3-235b-a22b-thinking-2507', 'qwen-3-coder-480b'}  # Add problematic models here
         
         # Models that don't support response_format parameter at all (use plain text mode)
         self.plain_text_models = {'gpt-oss-120b'}  # Models without structured output support
@@ -266,7 +266,7 @@ class CerebrasSchemaValidator:
                 # Plain text mode for models that don't support response_format
                 response_format = None  # No response format parameter
                 messages = [
-                    {"role": "system", "content": "You are a job validation assistant. Analyze the jobs and identify any that are false positives (role mismatches). Return ONLY a JSON object with this exact format: {\"flagged_job_urls\": [\"url1\", \"url2\"]} or {\"flagged_job_urls\": []} if none. No other text."},
+                    {"role": "system", "content": "You are a job validation assistant. You must analyze jobs for role mismatches and respond with ONLY a JSON object. Use this EXACT format: {\"flagged_job_urls\": [\"url1\", \"url2\"]} for flagged jobs or {\"flagged_job_urls\": []} if none. Do not include any other text, explanations, or analysis. ONLY the JSON object."},
                     {"role": "user", "content": prompt}
                 ]
                 logger.debug(f"Using plain text mode for {model_config.display_name}")
