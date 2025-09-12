@@ -267,9 +267,9 @@ class CerebrasSchemaValidator:
             
             # Make API call with appropriate messages
             if self.use_json_mode:
-                # Use system message to enforce JSON format in JSON mode
+                # Use aggressive system message to enforce JSON format in JSON mode
                 messages = [
-                    {"role": "system", "content": "You are a JSON API. You must respond only with valid JSON objects. Never include explanations, analysis, or any text outside the JSON structure."},
+                    {"role": "system", "content": "You are a JSON API that ONLY returns JSON objects. You must not provide any explanations, analysis, or text outside JSON. Respond with valid JSON only. No other text is allowed."},
                     {"role": "user", "content": prompt}
                 ]
             else:
@@ -279,7 +279,7 @@ class CerebrasSchemaValidator:
             response = client.chat.completions.create(
                 model=model_config.name,
                 messages=messages,
-                temperature=0.7,
+                temperature=0.1,  # Lower temperature for more focused, deterministic responses
                 max_completion_tokens=1000,
                 response_format=response_format
             )
@@ -345,11 +345,12 @@ class CerebrasSchemaValidator:
         """Extract JSON object from text that may contain additional content."""
         import re
         
-        # Try to find JSON object patterns
+        # First try to find any JSON-like structure
         json_patterns = [
             r'\{[^{}]*"flagged_job_urls"[^{}]*\}',  # Simple pattern
             r'\{[^{}]*"flagged_job_urls"[^{}]*(?:\[[^\]]*\])[^{}]*\}',  # With array
             r'\{(?:[^{}]|{[^{}]*})*\}',  # Nested braces
+            r'\{[^{}]*"flagged_job_urls"[^{}]*\[[^\]]*\][^{}]*\}',  # More specific with array
         ]
         
         for pattern in json_patterns:
@@ -364,28 +365,57 @@ class CerebrasSchemaValidator:
                 except json.JSONDecodeError:
                     continue
         
-        # If no pattern works, try to find array patterns and construct JSON
+        # If no complete JSON found, try to find array patterns and construct JSON
         array_patterns = [
             r'"flagged_job_urls":\s*\[([^\]]*)\]',
             r'"flagged_job_urls":\s*\[\s*\]',  # Empty array
+            r'flagged_job_urls["\']?\s*:\s*\[([^\]]*)\]',  # Without quotes around key
         ]
         
         for pattern in array_patterns:
-            match = re.search(pattern, text)
+            match = re.search(pattern, text, re.DOTALL)
             if match:
                 try:
                     # Construct a simple JSON object with the found array
-                    if pattern.endswith(r'\[\s*\]'):  # Empty array pattern
+                    if r'flagged_job_urls":\s*\[\s*\]' in pattern:  # Empty array pattern
                         constructed_json = '{"flagged_job_urls": []}'
                     else:
-                        array_content = match.group(1)
-                        constructed_json = f'{{"flagged_job_urls": [{array_content}]}}'
+                        array_content = match.group(1).strip()
+                        # Clean up the array content
+                        if array_content:
+                            constructed_json = f'{{"flagged_job_urls": [{array_content}]}}'
+                        else:
+                            constructed_json = '{"flagged_job_urls": []}'
                     
                     parsed = json.loads(constructed_json)
                     logger.info(f"Constructed valid JSON from array pattern")
                     return parsed
                 except json.JSONDecodeError:
                     continue
+        
+        # If model is being verbose but mentions no flagged jobs, assume empty result
+        if any(phrase in text.lower() for phrase in [
+            'no jobs should be flagged',
+            'no role mismatches',
+            'no false positives',
+            'all jobs appear suitable',
+            'no clear mismatches',
+            'no fundamental incompatibilities',
+            'all positions appear to be suitable',
+            'found no clear role mismatches',
+            'no jobs that should be flagged',
+            'all seem appropriate',
+            'no mismatches found',
+            'appear suitable for the candidate'
+        ]):
+            logger.info("Model indicates no flagged jobs in verbose response, returning empty result")
+            return {"flagged_job_urls": []}
+        
+        # Last resort: if response is very long and doesn't contain any JSON structure,
+        # and doesn't mention specific job URLs being flagged, assume no flagged jobs
+        if len(text) > 500 and 'http' not in text and '{' not in text and '[' not in text:
+            logger.info("Long response without JSON structure or URLs, assuming no flagged jobs")
+            return {"flagged_job_urls": []}
         
         logger.warning(f"Could not extract valid JSON from text: {text[:200]}...")
         return None
@@ -502,19 +532,22 @@ EVALUATION RULES:
 
 YOU MUST RESPOND ONLY WITH VALID JSON. NO OTHER TEXT ALLOWED.
 
-Return ONLY job URLs that represent clear role mismatches in this exact JSON format:
+DO NOT EXPLAIN. DO NOT ANALYZE. DO NOT PROVIDE COMMENTARY.
+RETURN ONLY THE JSON OBJECT BELOW.
+
+For role mismatches, return this exact JSON format:
 
 {{
   "flagged_job_urls": ["url1", "url2", "url3"]
 }}
 
-If no jobs should be flagged, return:
+If no jobs should be flagged, return this exact JSON:
 
 {{
   "flagged_job_urls": []
 }}
 
-CRITICAL: Your response must be valid JSON only. Do not include any explanations, analysis, or other text outside the JSON object."""
+CRITICAL: Your entire response must be ONLY the JSON object above. No additional text, no explanations, no analysis. JSON ONLY."""
 
         return prompt
 
