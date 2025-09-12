@@ -677,42 +677,75 @@ CRITICAL: Your entire response must be ONLY the JSON object above. No additional
         try:
             # Look for the basic structure and try to complete it
             if '"flagged_job_urls":' in text:
-                # Find where the array starts
-                array_start = text.find('"flagged_job_urls":')
-                if array_start != -1:
-                    # Find the opening bracket
-                    bracket_start = text.find('[', array_start)
-                    if bracket_start != -1:
-                        # Find the last complete URL (ending with quote and comma)
-                        lines = text.split('\n')
-                        fixed_lines = []
+                # Check if this is single-line or multi-line JSON
+                if '\n' in text and text.count('\n') > 2:
+                    # Multi-line JSON handling
+                    array_start = text.find('"flagged_job_urls":')
+                    if array_start != -1:
+                        bracket_start = text.find('[', array_start)
+                        if bracket_start != -1:
+                            lines = text.split('\n')
+                            fixed_lines = []
+                            
+                            for line in lines:
+                                # If this line has a complete URL (ends with quote and comma), keep it
+                                if '",' in line and 'http' in line:
+                                    fixed_lines.append(line)
+                                # If this line starts the array or object, keep it
+                                elif any(marker in line for marker in ['{', '"flagged_job_urls":', '[']):
+                                    fixed_lines.append(line)
+                                # Skip incomplete lines (truncated URLs)
+                            
+                            # Reconstruct the JSON
+                            if fixed_lines:
+                                # Ensure we have proper closing
+                                reconstructed = '\n'.join(fixed_lines)
+                                
+                                # Remove trailing comma if present
+                                if reconstructed.rstrip().endswith(','):
+                                    reconstructed = reconstructed.rstrip()[:-1]
+                                
+                                # Add proper closing if needed
+                                if not reconstructed.rstrip().endswith(']'):
+                                    reconstructed += '\n  ]\n}'
+                                elif not reconstructed.rstrip().endswith('}'):
+                                    reconstructed += '\n}'
+                                
+                                logger.info(f"Reconstructed multi-line JSON from {len(lines)} lines to {len(fixed_lines)} complete lines")
+                                return reconstructed
+                else:
+                    # Single-line JSON handling
+                    # Find the array content and extract complete URLs
+                    array_start = text.find('"flagged_job_urls": [')
+                    if array_start != -1:
+                        array_content_start = text.find('[', array_start) + 1
                         
-                        for line in lines:
-                            # If this line has a complete URL (ends with quote and comma), keep it
-                            if '",' in line and 'http' in line:
-                                fixed_lines.append(line)
-                            # If this line starts the array or object, keep it
-                            elif any(marker in line for marker in ['{', '"flagged_job_urls":', '[']):
-                                fixed_lines.append(line)
-                            # Skip incomplete lines (truncated URLs)
+                        # Extract URLs up to the truncation point
+                        remaining = text[array_content_start:]
                         
-                        # Reconstruct the JSON
-                        if fixed_lines:
-                            # Ensure we have proper closing
-                            reconstructed = '\n'.join(fixed_lines)
-                            
-                            # Remove trailing comma if present
-                            if reconstructed.rstrip().endswith(','):
-                                reconstructed = reconstructed.rstrip()[:-1]
-                            
-                            # Add proper closing if needed
-                            if not reconstructed.rstrip().endswith(']'):
-                                reconstructed += '\n  ]\n}'
-                            elif not reconstructed.rstrip().endswith('}'):
-                                reconstructed += '\n}'
-                            
-                            logger.info(f"Reconstructed JSON from {len(lines)} lines to {len(fixed_lines)} complete lines")
+                        # Find all complete URLs (those that end with quotes)
+                        import re
+                        # More robust URL pattern that handles various URL formats
+                        url_pattern = r'"(https?://[^"]+)"'
+                        complete_urls = re.findall(url_pattern, remaining)
+                        
+                        # Additional validation: ensure URLs are reasonably formatted
+                        valid_urls = []
+                        for url in complete_urls:
+                            # Basic validation: URL should have domain and not be empty
+                            if len(url) > 10 and '.' in url and not url.endswith('...'):
+                                valid_urls.append(url)
+                        
+                        if valid_urls:
+                            # Reconstruct JSON with complete URLs only
+                            url_list = ', '.join(f'"{url}"' for url in valid_urls)
+                            reconstructed = f'{{"flagged_job_urls": [{url_list}]}}'
+                            logger.info(f"Reconstructed single-line JSON with {len(valid_urls)} valid URLs (filtered from {len(complete_urls)} found)")
                             return reconstructed
+                        else:
+                            # No complete URLs found, return empty array
+                            logger.info("No valid complete URLs found in truncated JSON, returning empty array")
+                            return '{"flagged_job_urls": []}'
             
             return None
         except Exception as e:
