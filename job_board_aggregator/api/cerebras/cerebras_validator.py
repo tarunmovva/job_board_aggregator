@@ -286,10 +286,24 @@ class CerebrasSchemaValidator:
             if use_plain_text:
                 # Plain text mode for models that don't support response_format
                 response_format = None  # No response format parameter
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant. Always respond with valid JSON only. Never include explanations or other text."},
-                    {"role": "user", "content": f"Analyze these job postings and return a JSON object with flagged URLs. Format: {{\"flagged_job_urls\": [\"url1\", \"url2\"]}} or {{\"flagged_job_urls\": []}} if none.\n\n{prompt}"}
-                ]
+                if "gpt-oss" in model_config.name.lower():
+                    # Ultra-concise prompt for GPT OSS to avoid verbosity
+                    resume_snippet = resume_text[:1000] + "..." if len(resume_text) > 1000 else resume_text
+                    jobs_snippet = "\n".join([
+                        f"{i+1}. {job.get('job_link', '')} - {job.get('chunk_text', '')[:200]}..."
+                        for i, job in enumerate(job_batch[:20])  # Limit to first 20 jobs
+                    ])
+                    
+                    messages = [
+                        {"role": "system", "content": "Return only JSON. No analysis. Format: {\"flagged_job_urls\": [\"url1\"]} or {\"flagged_job_urls\": []}"},
+                        {"role": "user", "content": f"Resume: {resume_snippet}\n\nJobs:\n{jobs_snippet}\n\nFlag role mismatches only. Return JSON:"}
+                    ]
+                else:
+                    # Standard plain text prompt for other models
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant. Always respond with valid JSON only. Never include explanations or other text."},
+                        {"role": "user", "content": f"Analyze these job postings and return a JSON object with flagged URLs. Format: {{\"flagged_job_urls\": [\"url1\", \"url2\"]}} or {{\"flagged_job_urls\": []}} if none.\n\n{prompt}"}
+                    ]
                 logger.debug(f"Using plain text mode for {model_config.display_name}")
             elif use_schema_mode:
                 response_format = {
@@ -311,8 +325,13 @@ class CerebrasSchemaValidator:
                 logger.debug(f"Using JSON mode for {model_config.display_name}")
             
             # Create API call parameters
-            # Use higher token limit for thinking models that tend to be verbose
-            max_tokens = 1500 if "thinking" in model_config.name.lower() else 500
+            # Use higher token limit for thinking models and GPT OSS that tend to be verbose
+            if "thinking" in model_config.name.lower():
+                max_tokens = 1500
+            elif "gpt-oss" in model_config.name.lower():
+                max_tokens = 1000  # GPT OSS also tends to be verbose
+            else:
+                max_tokens = 500
             
             api_params = {
                 "model": model_config.name,
@@ -363,18 +382,46 @@ class CerebrasSchemaValidator:
                         "success": True,
                         "response_method": "truncated_thinking_fallback"
                     }
+                # For GPT OSS 120B, try to extract reasoning or assume no flagged jobs
+                elif "gpt-oss" in model_config.name.lower():
+                    logger.info(f"GPT OSS 120B response truncated, trying to extract from reasoning")
+                    # Reasoning might contain partial analysis - try to extract it
+                    if hasattr(response.choices[0].message, 'reasoning') and response.choices[0].message.reasoning:
+                        content = response.choices[0].message.reasoning
+                        logger.info(f"Using reasoning field as content for truncated GPT OSS response")
+                    else:
+                        logger.info(f"No reasoning available, assuming no flagged jobs")
+                        return {
+                            "model": model_config.name,
+                            "model_display": model_config.display_name,
+                            "batch_index": batch_idx,
+                            "flagged_job_urls": [],
+                            "jobs_processed": len(job_batch),
+                            "success": True,
+                            "response_method": "truncated_gpt_oss_fallback"
+                        }
             
             content = response.choices[0].message.content
             
+            # Handle GPT OSS 120B which sometimes puts content in reasoning field
+            if (not content or content.strip() == "") and hasattr(response.choices[0].message, 'reasoning'):
+                reasoning = response.choices[0].message.reasoning
+                if reasoning and reasoning.strip():
+                    logger.info(f"{model_config.display_name} content was empty but reasoning available, extracting from reasoning")
+                    content = reasoning
+            
             # Enhanced logging for plain text models like GPT OSS 120B
             if model_config.name in self.plain_text_models:
-                logger.info(f"GPT OSS 120B response details:")
+                logger.info(f"{model_config.display_name} response details:")
                 logger.info(f"  Response object: {response}")
                 logger.info(f"  Choices count: {len(response.choices) if response.choices else 'None'}")
                 logger.info(f"  Content length: {len(content) if content else 0}")
                 logger.info(f"  Content preview: '{content[:100] if content else 'EMPTY'}...'")
                 if hasattr(response.choices[0].message, 'role'):
                     logger.info(f"  Message role: {response.choices[0].message.role}")
+                if hasattr(response.choices[0].message, 'reasoning') and response.choices[0].message.reasoning:
+                    logger.info(f"  Reasoning length: {len(response.choices[0].message.reasoning)}")
+                    logger.info(f"  Reasoning preview: '{response.choices[0].message.reasoning[:100]}...'")
             
             if not content or content.strip() == "":
                 logger.error(f"Empty content from {model_config.display_name} batch {batch_idx}")
@@ -600,6 +647,28 @@ class CerebrasSchemaValidator:
             # If the thinking model is discussing mismatches but got cut off, assume conservative (no flags)
             logger.info("Thinking model was analyzing mismatches but got truncated, assuming no flagged jobs")
             return {"flagged_job_urls": []}
+        
+        # For GPT OSS models, try to extract analysis from reasoning-style text
+        if 'gpt-oss' in text.lower() or ('flag' in text.lower() and 'mismatch' in text.lower()):
+            # Look for explicit flagging decisions in GPT OSS reasoning
+            flagged_urls = []
+            lines = text.split('\n')
+            
+            for line in lines:
+                line_lower = line.lower()
+                # Look for definitive flagging statements
+                if any(phrase in line_lower for phrase in [
+                    'flag this', 'should be flagged', 'mismatch', 'not suitable'
+                ]) and 'http' in line:
+                    # Extract URL from this line
+                    import re
+                    url_match = re.search(r'https?://[^\s]+', line)
+                    if url_match:
+                        flagged_urls.append(url_match.group(0))
+            
+            if flagged_urls:
+                logger.info(f"Extracted {len(flagged_urls)} flagged URLs from GPT OSS reasoning")
+                return {"flagged_job_urls": flagged_urls}
         
         # Last resort: if response is very long and doesn't contain any JSON structure,
         # and doesn't mention specific job URLs being flagged, assume no flagged jobs
