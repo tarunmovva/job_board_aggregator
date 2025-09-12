@@ -36,9 +36,9 @@ class CerebrasSchemaValidator:
             # High context models (65,536 tokens)
             ModelConfig("llama-3.3-70b", "Llama 3.3 70B", 65536),
             ModelConfig("qwen-3-coder-480b", "Qwen 3 Coder 480B", 65536),
-            # ModelConfig("qwen-3-235b-a22b-thinking-2507", "Qwen 3 235B Thinking", 65536),
+            ModelConfig("qwen-3-235b-a22b-thinking-2507", "Qwen 3 235B Thinking", 65536),
             ModelConfig("qwen-3-32b", "Qwen 3 32B", 65536),
-            # ModelConfig("gpt-oss-120b", "GPT OSS 120B", 65536),
+            ModelConfig("gpt-oss-120b", "GPT OSS 120B", 65536),
             # High context model (64,000 tokens)
             ModelConfig("qwen-3-235b-a22b-instruct-2507", "Qwen 3 235B Instruct", 64000),
         ]
