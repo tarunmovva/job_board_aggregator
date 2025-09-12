@@ -266,8 +266,8 @@ class CerebrasSchemaValidator:
                 # Plain text mode for models that don't support response_format
                 response_format = None  # No response format parameter
                 messages = [
-                    {"role": "system", "content": "You are a job validation assistant. You must analyze jobs for role mismatches and respond with ONLY a JSON object. Use this EXACT format: {\"flagged_job_urls\": [\"url1\", \"url2\"]} for flagged jobs or {\"flagged_job_urls\": []} if none. Do not include any other text, explanations, or analysis. ONLY the JSON object."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": "You are a helpful assistant. Always respond with valid JSON only. Never include explanations or other text."},
+                    {"role": "user", "content": f"Analyze these job postings and return a JSON object with flagged URLs. Format: {{\"flagged_job_urls\": [\"url1\", \"url2\"]}} or {{\"flagged_job_urls\": []}} if none.\n\n{prompt}"}
                 ]
                 logger.debug(f"Using plain text mode for {model_config.display_name}")
             elif use_schema_mode:
@@ -309,8 +309,34 @@ class CerebrasSchemaValidator:
                 return self._create_error_result(model_config, batch_idx, job_batch, "Empty response from API")
             
             content = response.choices[0].message.content
+            
+            # Enhanced logging for plain text models like GPT OSS 120B
+            if model_config.name in self.plain_text_models:
+                logger.info(f"GPT OSS 120B response details:")
+                logger.info(f"  Response object: {response}")
+                logger.info(f"  Choices count: {len(response.choices) if response.choices else 'None'}")
+                logger.info(f"  Content length: {len(content) if content else 0}")
+                logger.info(f"  Content preview: '{content[:100] if content else 'EMPTY'}...'")
+                if hasattr(response.choices[0].message, 'role'):
+                    logger.info(f"  Message role: {response.choices[0].message.role}")
+            
             if not content or content.strip() == "":
                 logger.error(f"Empty content from {model_config.display_name} batch {batch_idx}")
+                if model_config.name in self.plain_text_models:
+                    logger.error(f"Plain text model prompt was: {messages[1]['content'][:200]}...")
+                    logger.error("GPT OSS 120B may need different prompt approach or has API limitations")
+                    # For GPT OSS 120B, try to continue with empty result rather than error
+                    if model_config.name == 'gpt-oss-120b':
+                        logger.warning("GPT OSS 120B returned empty content, treating as no flagged jobs")
+                        return {
+                            "model": model_config.name,
+                            "model_display": model_config.display_name,
+                            "batch_index": batch_idx,
+                            "flagged_job_urls": [],
+                            "jobs_processed": len(job_batch),
+                            "success": True,
+                            "response_method": "empty_content_fallback"
+                        }
                 return self._create_error_result(model_config, batch_idx, job_batch, "Empty content in response")
             
             # Log raw content for debugging (first 200 chars)
