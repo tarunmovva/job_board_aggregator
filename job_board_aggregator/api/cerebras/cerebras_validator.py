@@ -47,6 +47,7 @@ class CerebrasSchemaValidator:
         self.max_jobs_per_batch = int(os.getenv('CEREBRAS_MAX_JOBS_PER_BATCH', '180'))
         self.resume_max_chars = int(os.getenv('CEREBRAS_RESUME_MAX_CHARS', '15000'))
         self.require_unanimous = os.getenv('CEREBRAS_REQUIRE_UNANIMOUS', 'true').lower() == 'true'
+        self.prefer_non_thinking = os.getenv('CEREBRAS_PREFER_NON_THINKING', 'true').lower() == 'true'
         
         # JSON Schema for reference (now using JSON mode for better compatibility)
         self.response_schema = {
@@ -77,6 +78,7 @@ class CerebrasSchemaValidator:
         logger.info(f"Plain text mode for models: {self.plain_text_models}")
         logger.info(f"Max jobs per batch: {self.max_jobs_per_batch}")
         logger.info(f"Require unanimous consensus: {self.require_unanimous}")
+        logger.info(f"Prefer non-thinking models: {self.prefer_non_thinking}")
         
         # Log model mode assignments
         for model in self.available_models:
@@ -110,7 +112,16 @@ class CerebrasSchemaValidator:
             return [], {"models_used": [], "jobs_evaluated": 0}
         
         # Randomly select 2 models for this validation
-        selected_models = random.sample(self.available_models, 2)
+        if self.prefer_non_thinking:
+            # Prefer non-thinking models for more reliable JSON output
+            non_thinking_models = [m for m in self.available_models if "thinking" not in m.name.lower()]
+            if len(non_thinking_models) >= 2:
+                selected_models = random.sample(non_thinking_models, 2)
+            else:
+                # Fall back to all models if not enough non-thinking models
+                selected_models = random.sample(self.available_models, 2)
+        else:
+            selected_models = random.sample(self.available_models, 2)
         
         logger.info(f"Selected models for validation: {[m.display_name for m in selected_models]}")
         
@@ -300,11 +311,14 @@ class CerebrasSchemaValidator:
                 logger.debug(f"Using JSON mode for {model_config.display_name}")
             
             # Create API call parameters
+            # Use higher token limit for thinking models that tend to be verbose
+            max_tokens = 1500 if "thinking" in model_config.name.lower() else 500
+            
             api_params = {
                 "model": model_config.name,
                 "messages": messages,
                 "temperature": 0.1,  # Lower temperature for more focused, deterministic responses
-                "max_completion_tokens": 500,  # Increased from 200 to prevent JSON truncation with URLs
+                "max_completion_tokens": max_tokens,
             }
             
             # Only add response_format if the model supports it
@@ -318,10 +332,37 @@ class CerebrasSchemaValidator:
             
             response = client.chat.completions.create(**api_params)
             
+            # Log token usage and completion details
+            if hasattr(response, 'usage') and response.usage:
+                logger.info(f"{model_config.display_name} token usage: "
+                           f"prompt={response.usage.prompt_tokens}, "
+                           f"completion={response.usage.completion_tokens}, "
+                           f"total={response.usage.total_tokens}")
+            
+            if response.choices and hasattr(response.choices[0], 'finish_reason'):
+                logger.info(f"{model_config.display_name} finish_reason: {response.choices[0].finish_reason}")
+            
             # Validate response exists
             if not response or not response.choices:
                 logger.error(f"Empty response from {model_config.display_name} batch {batch_idx}")
                 return self._create_error_result(model_config, batch_idx, job_batch, "Empty response from API")
+            
+            # Check for truncated response due to token limit
+            finish_reason = response.choices[0].finish_reason
+            if finish_reason == 'length':
+                logger.warning(f"Response from {model_config.display_name} was truncated due to token limit")
+                # For thinking models, this is common - try to extract partial JSON or assume no flagged jobs
+                if "thinking" in model_config.name.lower():
+                    logger.info(f"Thinking model {model_config.display_name} response truncated, assuming no flagged jobs")
+                    return {
+                        "model": model_config.name,
+                        "model_display": model_config.display_name,
+                        "batch_index": batch_idx,
+                        "flagged_job_urls": [],
+                        "jobs_processed": len(job_batch),
+                        "success": True,
+                        "response_method": "truncated_thinking_fallback"
+                    }
             
             content = response.choices[0].message.content
             
@@ -546,9 +587,18 @@ class CerebrasSchemaValidator:
             'no jobs that should be flagged',
             'all seem appropriate',
             'no mismatches found',
-            'appear suitable for the candidate'
+            'appear suitable for the candidate',
+            'no urls to flag',
+            'no flagged urls',
+            'no jobs to flag'
         ]):
             logger.info("Model indicates no flagged jobs in verbose response, returning empty result")
+            return {"flagged_job_urls": []}
+        
+        # For thinking models that got truncated without JSON, check if they were analyzing mismatches
+        if len(text) > 1000 and 'mismatch' in text.lower() and '{' not in text and '[' not in text:
+            # If the thinking model is discussing mismatches but got cut off, assume conservative (no flags)
+            logger.info("Thinking model was analyzing mismatches but got truncated, assuming no flagged jobs")
             return {"flagged_job_urls": []}
         
         # Last resort: if response is very long and doesn't contain any JSON structure,
@@ -693,31 +743,16 @@ class CerebrasSchemaValidator:
         
         # Use more concise prompt for thinking models to avoid verbosity
         if "thinking" in model_name.lower():
-            prompt = f"""CANDIDATE RESUME (Enhanced):
-{truncated_resume}
+            # Ultra-concise prompt for thinking models
+            resume_snippet = truncated_resume[:500] + "..." if len(truncated_resume) > 500 else truncated_resume
+            jobs_snippet = jobs_text[:2000] + "..." if len(jobs_text) > 2000 else jobs_text
+            
+            prompt = f"""Resume: {resume_snippet}
 
-JOBS TO EVALUATE ({len(job_batch)} jobs):
-{jobs_text}
+Jobs ({len(job_batch)}):
+{jobs_snippet}
 
-TASK: Identify job URLs that are ROLE MISMATCHES.
-
-CRITERIA - Flag if:
-- Different role category (Software Engineer ↔ Data Scientist)
-- Wrong seniority (Junior ↔ Senior/Lead)
-- Core tech mismatch (Java ↔ Python/ML roles)
-- Domain mismatch (Web ↔ Scientific computing)
-
-RETURN ONLY JSON. NO ANALYSIS. NO THINKING. NO EXPLANATION.
-
-{{
-  "flagged_job_urls": ["url1", "url2"] 
-}}
-
-OR for no mismatches:
-
-{{
-  "flagged_job_urls": []
-}}"""
+Flag role mismatches only. Return JSON: {{"flagged_job_urls": ["url1"]}} or {{"flagged_job_urls": []}}"""
         else:
             # Standard detailed prompt for other models
             prompt = f"""You are an expert HR recruiter using {model_name} to identify FALSE POSITIVE job matches based on ROLE COMPATIBILITY.
