@@ -66,10 +66,10 @@ class CerebrasSchemaValidator:
         self.use_json_mode = os.getenv('CEREBRAS_USE_JSON_MODE', 'true').lower() == 'true'
         
         # Models that have issues with JSON mode and should use schema mode
-        self.schema_mode_models = {'qwen-3-32b', 'qwen-3-235b-a22b-thinking-2507', 'qwen-3-coder-480b'}  # Add problematic models here
+        self.schema_mode_models = {'qwen-3-32b', 'qwen-3-coder-480b'}  # Add problematic models here
         
         # Models that don't support response_format parameter at all (use plain text mode)
-        self.plain_text_models = {'gpt-oss-120b'}  # Models without structured output support
+        self.plain_text_models = {'gpt-oss-120b', 'qwen-3-235b-a22b-thinking-2507'}  # Models without structured output support
         
         logger.info(f"Initialized CerebrasSchemaValidator with {len(self.available_models)} available models")
         logger.info(f"Default mode: {'JSON mode' if self.use_json_mode else 'strict schema mode'}")
@@ -77,6 +77,16 @@ class CerebrasSchemaValidator:
         logger.info(f"Plain text mode for models: {self.plain_text_models}")
         logger.info(f"Max jobs per batch: {self.max_jobs_per_batch}")
         logger.info(f"Require unanimous consensus: {self.require_unanimous}")
+        
+        # Log model mode assignments
+        for model in self.available_models:
+            if model.name in self.plain_text_models:
+                mode = "plain text"
+            elif model.name in self.schema_mode_models:
+                mode = "schema"
+            else:
+                mode = "JSON" if self.use_json_mode else "schema"
+            logger.info(f"  {model.display_name} -> {mode} mode")
     
     def _load_api_key(self) -> str:
         """Load Cerebras API key from environment."""
@@ -301,6 +311,11 @@ class CerebrasSchemaValidator:
             if response_format is not None:
                 api_params["response_format"] = response_format
             
+            # Log API call details for debugging
+            logger.info(f"Calling {model_config.display_name} with {len(api_params['messages'])} messages, "
+                       f"response_format: {api_params.get('response_format', {}).get('type', 'none')}, "
+                       f"max_tokens: {api_params['max_completion_tokens']}")
+            
             response = client.chat.completions.create(**api_params)
             
             # Validate response exists
@@ -373,8 +388,16 @@ class CerebrasSchemaValidator:
         except Exception as e:
             error_str = str(e)
             
+            # Enhanced error logging for debugging
+            logger.info(f"API call failed for {model_config.display_name}:")
+            logger.info(f"  Error type: {type(e).__name__}")
+            logger.info(f"  Error message: {error_str[:300]}...")
+            if hasattr(e, 'response'):
+                logger.info(f"  HTTP status: {getattr(e.response, 'status_code', 'unknown')}")
+                logger.info(f"  Response headers: {getattr(e.response, 'headers', {})}")
+            
             # Log the specific error for debugging
-            logger.debug(f"API error for {model_config.display_name}: {error_str[:200]}...")
+            logger.debug(f"Full API error for {model_config.display_name}: {error_str}")
             
             # Handle specific Cerebras API errors
             if ("incomplete_json_output" in error_str or 
@@ -383,7 +406,16 @@ class CerebrasSchemaValidator:
                 "Bad Request" in error_str or
                 "too_many_tokens" in error_str or
                 "maximum context length" in error_str):
-                logger.warning(f"Model {model_config.display_name} failed to generate JSON (likely too verbose), assuming no flagged jobs")
+                
+                # Special handling for thinking models that might be too verbose
+                if "thinking" in model_config.name.lower():
+                    logger.warning(f"Thinking model {model_config.display_name} failed with 400 error - likely too verbose or unsupported format")
+                    logger.info(f"Switching {model_config.display_name} to plain text mode for future requests")
+                    # Add this model to plain text models list for session
+                    self.plain_text_models.add(model_config.name)
+                else:
+                    logger.warning(f"Model {model_config.display_name} failed to generate JSON (likely too verbose), assuming no flagged jobs")
+                
                 # Extract any partial analysis from the failed generation if available
                 if "failed_generation" in error_str:
                     # Try to extract flagged URLs from the failed generation text
@@ -659,7 +691,36 @@ class CerebrasSchemaValidator:
         
         jobs_text = "\n".join(jobs_list)
         
-        prompt = f"""You are an expert HR recruiter using {model_name} to identify FALSE POSITIVE job matches based on ROLE COMPATIBILITY.
+        # Use more concise prompt for thinking models to avoid verbosity
+        if "thinking" in model_name.lower():
+            prompt = f"""CANDIDATE RESUME (Enhanced):
+{truncated_resume}
+
+JOBS TO EVALUATE ({len(job_batch)} jobs):
+{jobs_text}
+
+TASK: Identify job URLs that are ROLE MISMATCHES.
+
+CRITERIA - Flag if:
+- Different role category (Software Engineer ↔ Data Scientist)
+- Wrong seniority (Junior ↔ Senior/Lead)
+- Core tech mismatch (Java ↔ Python/ML roles)
+- Domain mismatch (Web ↔ Scientific computing)
+
+RETURN ONLY JSON. NO ANALYSIS. NO THINKING. NO EXPLANATION.
+
+{{
+  "flagged_job_urls": ["url1", "url2"] 
+}}
+
+OR for no mismatches:
+
+{{
+  "flagged_job_urls": []
+}}"""
+        else:
+            # Standard detailed prompt for other models
+            prompt = f"""You are an expert HR recruiter using {model_name} to identify FALSE POSITIVE job matches based on ROLE COMPATIBILITY.
 
 CANDIDATE RESUME (Enhanced & Optimized):
 {truncated_resume}"
