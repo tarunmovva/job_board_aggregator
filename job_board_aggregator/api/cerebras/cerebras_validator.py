@@ -66,11 +66,15 @@ class CerebrasSchemaValidator:
         self.use_json_mode = os.getenv('CEREBRAS_USE_JSON_MODE', 'true').lower() == 'true'
         
         # Models that have issues with JSON mode and should use schema mode
-        self.schema_mode_models = {'qwen-3-32b'}  # Add problematic models here
+        self.schema_mode_models = {'qwen-3-32b', 'qwen-3-235b-a22b-thinking-2507'}  # Add problematic models here
+        
+        # Models that don't support response_format parameter at all (use plain text mode)
+        self.plain_text_models = {'gpt-oss-120b'}  # Models without structured output support
         
         logger.info(f"Initialized CerebrasSchemaValidator with {len(self.available_models)} available models")
         logger.info(f"Default mode: {'JSON mode' if self.use_json_mode else 'strict schema mode'}")
         logger.info(f"Schema mode override for models: {self.schema_mode_models}")
+        logger.info(f"Plain text mode for models: {self.plain_text_models}")
         logger.info(f"Max jobs per batch: {self.max_jobs_per_batch}")
         logger.info(f"Require unanimous consensus: {self.require_unanimous}")
     
@@ -255,9 +259,18 @@ class CerebrasSchemaValidator:
             prompt = self._create_validation_prompt(job_batch, resume_text, model_config.display_name, batch_idx)
             
             # Choose response format based on configuration and model compatibility
+            use_plain_text = model_config.name in self.plain_text_models
             use_schema_mode = (not self.use_json_mode) or (model_config.name in self.schema_mode_models)
             
-            if use_schema_mode:
+            if use_plain_text:
+                # Plain text mode for models that don't support response_format
+                response_format = None  # No response format parameter
+                messages = [
+                    {"role": "system", "content": "You are a job validation assistant. Analyze the jobs and identify any that are false positives (role mismatches). Return ONLY a JSON object with this exact format: {\"flagged_job_urls\": [\"url1\", \"url2\"]} or {\"flagged_job_urls\": []} if none. No other text."},
+                    {"role": "user", "content": prompt}
+                ]
+                logger.debug(f"Using plain text mode for {model_config.display_name}")
+            elif use_schema_mode:
                 response_format = {
                     "type": "json_schema",
                     "json_schema": {
@@ -276,13 +289,19 @@ class CerebrasSchemaValidator:
                 ]
                 logger.debug(f"Using JSON mode for {model_config.display_name}")
             
-            response = client.chat.completions.create(
-                model=model_config.name,
-                messages=messages,
-                temperature=0.1,  # Lower temperature for more focused, deterministic responses
-                max_completion_tokens=500,  # Increased from 200 to prevent JSON truncation with URLs
-                response_format=response_format
-            )
+            # Create API call parameters
+            api_params = {
+                "model": model_config.name,
+                "messages": messages,
+                "temperature": 0.1,  # Lower temperature for more focused, deterministic responses
+                "max_completion_tokens": 500,  # Increased from 200 to prevent JSON truncation with URLs
+            }
+            
+            # Only add response_format if the model supports it
+            if response_format is not None:
+                api_params["response_format"] = response_format
+            
+            response = client.chat.completions.create(**api_params)
             
             # Validate response exists
             if not response or not response.choices:
