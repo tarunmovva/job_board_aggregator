@@ -347,8 +347,16 @@ class CerebrasSchemaValidator:
         except Exception as e:
             error_str = str(e)
             
+            # Log the specific error for debugging
+            logger.debug(f"API error for {model_config.display_name}: {error_str[:200]}...")
+            
             # Handle specific Cerebras API errors
-            if "incomplete_json_output" in error_str or "Failed to generate JSON" in error_str:
+            if ("incomplete_json_output" in error_str or 
+                "Failed to generate JSON" in error_str or
+                "400" in error_str or
+                "Bad Request" in error_str or
+                "too_many_tokens" in error_str or
+                "maximum context length" in error_str):
                 logger.warning(f"Model {model_config.display_name} failed to generate JSON (likely too verbose), assuming no flagged jobs")
                 # Extract any partial analysis from the failed generation if available
                 if "failed_generation" in error_str:
