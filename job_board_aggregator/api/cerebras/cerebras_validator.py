@@ -109,6 +109,7 @@ class CerebrasSchemaValidator:
             
         Returns:
             Tuple of (false_positive_urls, validation_metadata)
+            Note: false_positive_urls are returned in their original format for accurate filtering
         """
         if not job_matches:
             return [], {"models_used": [], "jobs_evaluated": 0}
@@ -126,6 +127,9 @@ class CerebrasSchemaValidator:
             selected_models = random.sample(self.available_models, 2)
         
         logger.info(f"Selected models for validation: {[m.display_name for m in selected_models]}")
+        
+        # Create URL mapping for consistent filtering (normalized -> original)
+        self.url_mapping = self._create_url_mapping(job_matches)
         
         try:
             # Determine if we need batch processing
@@ -188,8 +192,27 @@ class CerebrasSchemaValidator:
                 "require_unanimous": self.require_unanimous
             }
             
-            logger.info(f"Validation complete: {len(all_false_positives)} false positives from {len(job_matches)} jobs")
-            return list(all_false_positives), metadata
+            # Convert normalized URLs back to original URLs for accurate filtering
+            original_false_positives = []
+            mapping_stats = {"successful": 0, "missing": 0}
+            
+            for normalized_url in all_false_positives:
+                original_url = self.url_mapping.get(normalized_url, normalized_url)
+                original_false_positives.append(original_url)
+                
+                if normalized_url in self.url_mapping:
+                    mapping_stats["successful"] += 1
+                    if normalized_url != original_url:
+                        logger.debug(f"Mapped normalized URL '{normalized_url}' back to original '{original_url}'")
+                else:
+                    mapping_stats["missing"] += 1
+                    logger.warning(f"No mapping found for normalized URL '{normalized_url}', using as-is")
+            
+            logger.info(f"Validation complete: {len(original_false_positives)} false positives from {len(job_matches)} jobs")
+            logger.info(f"URL mapping: {mapping_stats['successful']} successful, {mapping_stats['missing']} missing")
+            if original_false_positives:
+                logger.info(f"False positive URLs (original format): {original_false_positives[:3]}{'...' if len(original_false_positives) > 3 else ''}")
+            return original_false_positives, metadata
             
         except Exception as e:
             logger.error(f"Cerebras validation failed: {e}")
@@ -766,6 +789,36 @@ class CerebrasSchemaValidator:
         
         return url
     
+    def _create_url_mapping(self, job_matches: List[Dict]) -> Dict[str, str]:
+        """Create mapping from normalized URLs to original URLs for consistent filtering."""
+        url_mapping = {}
+        duplicate_mappings = []
+        
+        for job in job_matches:
+            original_url = job.get('job_link', '')
+            if not original_url:
+                continue
+                
+            normalized_url = self._normalize_url(original_url)
+            if not normalized_url:
+                continue
+            
+            # Check for duplicate normalized URLs (different originals map to same normalized)
+            if normalized_url in url_mapping and url_mapping[normalized_url] != original_url:
+                duplicate_mappings.append((normalized_url, url_mapping[normalized_url], original_url))
+                # Keep the first mapping encountered
+                continue
+            
+            url_mapping[normalized_url] = original_url
+        
+        if duplicate_mappings:
+            logger.warning(f"Found {len(duplicate_mappings)} normalized URLs with multiple original forms:")
+            for norm_url, first_orig, second_orig in duplicate_mappings[:3]:
+                logger.warning(f"  '{norm_url}' maps to both '{first_orig}' and '{second_orig}'")
+        
+        logger.debug(f"Created URL mapping: {len(url_mapping)} normalized -> original mappings")
+        return url_mapping
+    
     def _extract_flagged_urls(self, parsed_result: Dict, model_name: str) -> List[str]:
         """Extract flagged URLs from parsed JSON with fallback parsing."""
         # Try standard format first
@@ -825,6 +878,14 @@ class CerebrasSchemaValidator:
             common_domains = model1_domains & model2_domains
             if common_domains:
                 logger.warning(f"  Common domains found: {len(common_domains)} - possible URL format differences")
+        
+        # Enhanced logging for successful consensus
+        if len(unanimous_false_positives) > 0:
+            logger.info(f"Consensus achieved on {len(unanimous_false_positives)} URLs:")
+            for url in sorted(list(unanimous_false_positives)[:5]):  # Log first 5
+                logger.info(f"  Flagged: {url}")
+            if len(unanimous_false_positives) > 5:
+                logger.info(f"  ... and {len(unanimous_false_positives) - 5} more")
         
         # Fallback to partial consensus if enabled and no unanimous agreement
         if len(unanimous_false_positives) == 0 and self.allow_partial_consensus:

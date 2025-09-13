@@ -472,12 +472,50 @@ async def match_resume_upload(
                     all_results, final_resume_text
                 )
                 
-                # Filter out false positives
+                # Filter out false positives with detailed logging
                 if false_positive_urls:
                     original_count = len(filtered_results)
-                    filtered_results = [job for job in filtered_results 
-                                      if job.get('job_link') not in false_positive_urls]
-                    removed_count = original_count - len(filtered_results)
+                    
+                    # Log false positive URLs for debugging
+                    logger.info(f"Attempting to remove {len(false_positive_urls)} false positive URLs:")
+                    for i, fp_url in enumerate(false_positive_urls[:3]):  # Log first 3
+                        logger.info(f"  {i+1}. {fp_url}")
+                    if len(false_positive_urls) > 3:
+                        logger.info(f"  ... and {len(false_positive_urls) - 3} more")
+                    
+                    # Create set for faster lookup
+                    false_positive_set = set(false_positive_urls)
+                    
+                    # Filter with detailed tracking
+                    filtered_results_new = []
+                    removed_urls = []
+                    
+                    for job in filtered_results:
+                        job_url = job.get('job_link', '')
+                        if job_url in false_positive_set:
+                            removed_urls.append(job_url)
+                            logger.debug(f"Removing false positive: {job_url}")
+                        else:
+                            filtered_results_new.append(job)
+                    
+                    filtered_results = filtered_results_new
+                    removed_count = len(removed_urls)
+                    
+                    if removed_count > 0:
+                        logger.info(f"Successfully removed {removed_count} false positives:")
+                        for removed_url in removed_urls[:3]:
+                            logger.info(f"  Removed: {removed_url}")
+                        if len(removed_urls) > 3:
+                            logger.info(f"  ... and {len(removed_urls) - 3} more")
+                    else:
+                        logger.warning(f"No jobs were actually removed despite {len(false_positive_urls)} flagged URLs")
+                        logger.warning("This suggests URL format mismatch between flagged URLs and job URLs")
+                        
+                        # Debug: Show sample job URLs vs flagged URLs
+                        if filtered_results:
+                            sample_job_urls = [job.get('job_link', '') for job in filtered_results[:3]]
+                            logger.warning(f"Sample job URLs: {sample_job_urls}")
+                            logger.warning(f"Sample flagged URLs: {false_positive_urls[:3]}")
                     
                     logger.info(f"Cerebras AI removed {removed_count} false positives using models: "
                                f"{validation_metadata.get('models_used', [])}")
