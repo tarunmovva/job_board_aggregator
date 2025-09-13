@@ -48,6 +48,7 @@ class CerebrasSchemaValidator:
         self.resume_max_chars = int(os.getenv('CEREBRAS_RESUME_MAX_CHARS', '15000'))
         self.require_unanimous = os.getenv('CEREBRAS_REQUIRE_UNANIMOUS', 'true').lower() == 'true'
         self.prefer_non_thinking = os.getenv('CEREBRAS_PREFER_NON_THINKING', 'true').lower() == 'true'
+        self.allow_partial_consensus = os.getenv('CEREBRAS_ALLOW_PARTIAL_CONSENSUS', 'false').lower() == 'true'
         
         # JSON Schema for reference (now using JSON mode for better compatibility)
         self.response_schema = {
@@ -79,6 +80,7 @@ class CerebrasSchemaValidator:
         logger.info(f"Max jobs per batch: {self.max_jobs_per_batch}")
         logger.info(f"Require unanimous consensus: {self.require_unanimous}")
         logger.info(f"Prefer non-thinking models: {self.prefer_non_thinking}")
+        logger.info(f"Allow partial consensus: {self.allow_partial_consensus}")
         
         # Log model mode assignments
         for model in self.available_models:
@@ -325,11 +327,15 @@ class CerebrasSchemaValidator:
                 logger.debug(f"Using JSON mode for {model_config.display_name}")
             
             # Create API call parameters
-            # Use higher token limit for thinking models and GPT OSS that tend to be verbose
+            # Use higher token limit for verbose models and large batches
             if "thinking" in model_config.name.lower():
                 max_tokens = 1500
             elif "gpt-oss" in model_config.name.lower():
                 max_tokens = 1000  # GPT OSS also tends to be verbose
+            elif model_config.name in self.schema_mode_models and len(job_batch) > 50:
+                max_tokens = 800  # Schema mode models need more tokens for large batches
+            elif len(job_batch) > 80:
+                max_tokens = 700  # All models need more tokens for very large batches
             else:
                 max_tokens = 500
             
@@ -742,13 +748,33 @@ class CerebrasSchemaValidator:
         # This would need to be enhanced to map job numbers to actual URLs
         return []
     
+    def _normalize_url(self, url: str) -> str:
+        """Normalize URL for consistent matching."""
+        if not url:
+            return ""
+        
+        # Remove trailing slashes, fragments, and query parameters for matching
+        url = str(url).strip()
+        if url.endswith('/'):
+            url = url[:-1]
+        
+        # Remove fragments and query params for consensus matching
+        if '#' in url:
+            url = url.split('#')[0]
+        if '?' in url:
+            url = url.split('?')[0]
+        
+        return url
+    
     def _extract_flagged_urls(self, parsed_result: Dict, model_name: str) -> List[str]:
         """Extract flagged URLs from parsed JSON with fallback parsing."""
         # Try standard format first
         if "flagged_job_urls" in parsed_result:
             urls = parsed_result["flagged_job_urls"]
             if isinstance(urls, list):
-                return [str(url) for url in urls if url]  # Convert to strings and filter empty
+                # Normalize URLs for consistent matching
+                normalized_urls = [self._normalize_url(url) for url in urls if url]
+                return [url for url in normalized_urls if url]  # Filter empty after normalization
         
         # Try alternative formats that might be returned
         alternative_keys = ["flagged_urls", "false_positives", "removed_jobs", "flagged_jobs"]
@@ -757,7 +783,9 @@ class CerebrasSchemaValidator:
                 urls = parsed_result[key]
                 if isinstance(urls, list):
                     logger.warning(f"Model {model_name} used alternative key '{key}' instead of 'flagged_job_urls'")
-                    return [str(url) for url in urls if url]
+                    # Normalize URLs for consistent matching
+                    normalized_urls = [self._normalize_url(url) for url in urls if url]
+                    return [url for url in normalized_urls if url]  # Filter empty after normalization
         
         # If no valid array found, log and return empty
         logger.warning(f"Model {model_name} response did not contain valid flagged URLs: {parsed_result}")
@@ -770,16 +798,41 @@ class CerebrasSchemaValidator:
             logger.warning(f"Expected 2 model results, got {len(validation_results)}. No consensus possible.")
             return []
         
-        # Get flagged URLs from each model
+        # Get flagged URLs from each model (already normalized)
         model1_flagged = set(validation_results[0].get("flagged_job_urls", []))
         model2_flagged = set(validation_results[1].get("flagged_job_urls", []))
         
         # Find intersection - both models must agree
         unanimous_false_positives = model1_flagged & model2_flagged
         
-        logger.info(f"Model 1 ({validation_results[0].get('model_display', 'Unknown')}) flagged: {len(model1_flagged)}, "
-                   f"Model 2 ({validation_results[1].get('model_display', 'Unknown')}) flagged: {len(model2_flagged)}, "
+        # Enhanced logging for debugging consensus issues
+        model1_name = validation_results[0].get('model_display', 'Unknown')
+        model2_name = validation_results[1].get('model_display', 'Unknown')
+        
+        logger.info(f"Model 1 ({model1_name}) flagged: {len(model1_flagged)}, "
+                   f"Model 2 ({model2_name}) flagged: {len(model2_flagged)}, "
                    f"Unanimous: {len(unanimous_false_positives)}")
+        
+        # Debug logging when no consensus but both flagged some jobs
+        if len(unanimous_false_positives) == 0 and len(model1_flagged) > 0 and len(model2_flagged) > 0:
+            logger.warning(f"No consensus despite both models flagging jobs:")
+            logger.warning(f"  {model1_name} flagged: {sorted(list(model1_flagged)[:3])}{'...' if len(model1_flagged) > 3 else ''}")
+            logger.warning(f"  {model2_name} flagged: {sorted(list(model2_flagged)[:3])}{'...' if len(model2_flagged) > 3 else ''}")
+            
+            # Check for potential URL variations
+            model1_domains = {url.split('/')[-1].split('?')[0] for url in model1_flagged}
+            model2_domains = {url.split('/')[-1].split('?')[0] for url in model2_flagged}
+            common_domains = model1_domains & model2_domains
+            if common_domains:
+                logger.warning(f"  Common domains found: {len(common_domains)} - possible URL format differences")
+        
+        # Fallback to partial consensus if enabled and no unanimous agreement
+        if len(unanimous_false_positives) == 0 and self.allow_partial_consensus:
+            if len(model1_flagged) > 0 and len(model2_flagged) > 0:
+                # Use the more conservative model's results (fewer flags)
+                conservative_results = model1_flagged if len(model1_flagged) <= len(model2_flagged) else model2_flagged
+                logger.info(f"Using partial consensus: {len(conservative_results)} URLs from more conservative model")
+                return list(conservative_results)
         
         return list(unanimous_false_positives)
     
@@ -804,9 +857,22 @@ class CerebrasSchemaValidator:
         truncated_resume = self._truncate_resume(resume_text)
         
         # Create job list with minimal data (URL + chunk text only)
+        # Use shorter descriptions for large batches to manage token usage
+        desc_length = 200 if len(job_batch) > 80 else 250 if len(job_batch) > 60 else 300
+        
         jobs_list = []
         for i, job in enumerate(job_batch):
-            jobs_list.append(f"{i + 1}. URL: {job.get('job_link', '')} - Description: {job.get('chunk_text', '')[:300]}...")
+            chunk_text = job.get('chunk_text', '')
+            # More aggressive truncation for large batches
+            truncated_text = chunk_text[:desc_length]
+            # Try to end at a word boundary
+            if len(chunk_text) > desc_length:
+                last_space = truncated_text.rfind(' ')
+                if last_space > desc_length * 0.8:  # If we can find a good break point
+                    truncated_text = truncated_text[:last_space]
+                truncated_text += "..."
+            
+            jobs_list.append(f"{i + 1}. URL: {job.get('job_link', '')} - Description: {truncated_text}")
         
         jobs_text = "\n".join(jobs_list)
         
@@ -952,7 +1018,10 @@ CRITICAL: Your entire response must be ONLY the JSON object above. No additional
                         for url in complete_urls:
                             # Basic validation: URL should have domain and not be empty
                             if len(url) > 10 and '.' in url and not url.endswith('...'):
-                                valid_urls.append(url)
+                                # Normalize URL for consistent matching
+                                normalized_url = self._normalize_url(url)
+                                if normalized_url:
+                                    valid_urls.append(normalized_url)
                         
                         if valid_urls:
                             # Reconstruct JSON with complete URLs only
