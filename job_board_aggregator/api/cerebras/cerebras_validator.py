@@ -772,20 +772,24 @@ class CerebrasSchemaValidator:
         return []
     
     def _normalize_url(self, url: str) -> str:
-        """Normalize URL for consistent matching."""
+        """Normalize URL for consistent matching - only remove special characters that cause parsing issues."""
         if not url:
             return ""
         
-        # Remove trailing slashes, fragments, and query parameters for matching
+        # Only basic cleanup - preserve job-specific parameters like gh_jid
         url = str(url).strip()
-        if url.endswith('/'):
-            url = url[:-1]
         
-        # Remove fragments and query params for consensus matching
+        # Remove fragments (# anchors) as they don't affect job identity
         if '#' in url:
             url = url.split('#')[0]
-        if '?' in url:
-            url = url.split('?')[0]
+        
+        # Keep all query parameters - they often contain job IDs
+        # Don't remove ? parameters as they're essential for job identification
+        
+        # Only normalize trailing slash for paths that are clearly directories
+        # (have no query params and end with /)
+        if url.endswith('/') and '?' not in url and url.count('/') > 3:
+            url = url[:-1]
         
         return url
     
