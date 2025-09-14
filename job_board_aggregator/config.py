@@ -62,18 +62,37 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 # API client configuration
 API_TIMEOUT = int(os.environ.get("JOB_AGGREGATOR_TIMEOUT", "10"))
 
+# Minimal logging configuration
+MINIMAL_LOGGING = os.environ.get("MINIMAL_LOGGING", "false").lower() == "true"
+
 # Logging configuration
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 LOG_FILE = os.environ.get("JOB_AGGREGATOR_LOG", "job_aggregator.log")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format=LOG_FORMAT,
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Configure logging based on MINIMAL_LOGGING setting
+if MINIMAL_LOGGING:
+    # Minimal logging: only WARNING and above, simple format
+    logging.basicConfig(
+        level=logging.WARNING,
+        format='%(levelname)s: %(message)s',  # Simple one-line format
+        handlers=[
+            logging.StreamHandler(sys.stdout)  # Only console output
+        ]
+    )
+    # Disable verbose loggers from third-party libraries
+    logging.getLogger('uvicorn').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
+    logging.getLogger('fastapi').setLevel(logging.WARNING)
+else:
+    # Existing detailed logging configuration
+    logging.basicConfig(
+        level=logging.INFO,
+        format=LOG_FORMAT,
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 logger = logging.getLogger(__name__)

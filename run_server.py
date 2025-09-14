@@ -32,5 +32,20 @@ except ImportError:
     print("⚠️  python-dotenv not installed, skipping .env file reload")
 
 if __name__ == "__main__":
-    print("🚀 Starting Job Board Aggregator Server...")
-    uvicorn.run("job_board_aggregator.server.app:app", host="0.0.0.0", port=8080, reload=True)
+    # Check for minimal logging mode
+    minimal_logging = os.getenv('MINIMAL_LOGGING', 'false').lower() == 'true'
+    
+    if minimal_logging:
+        print("🔇 Minimal logging mode enabled - Starting server...")
+        # Configure uvicorn for minimal output
+        uvicorn.run(
+            "job_board_aggregator.server.app:app", 
+            host="0.0.0.0", 
+            port=8080, 
+            reload=True,
+            log_level="warning",  # Only warnings and errors
+            access_log=False      # Disable access logs
+        )
+    else:
+        print("🚀 Starting Job Board Aggregator Server...")
+        uvicorn.run("job_board_aggregator.server.app:app", host="0.0.0.0", port=8080, reload=True)
