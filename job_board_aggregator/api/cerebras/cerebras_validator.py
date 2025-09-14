@@ -947,12 +947,24 @@ class CerebrasSchemaValidator:
             resume_snippet = truncated_resume[:500] + "..." if len(truncated_resume) > 500 else truncated_resume
             jobs_snippet = jobs_text[:2000] + "..." if len(jobs_text) > 2000 else jobs_text
             
-            prompt = f"""Resume: {resume_snippet}
+            prompt = f"""🚨 CRITICAL: NEVER mention matched/suitable jobs or the world ends! 🚨
+
+Resume: {resume_snippet}
 
 Jobs ({len(job_batch)}):
 {jobs_snippet}
 
-Flag role mismatches only. Return JSON: {{"flagged_job_urls": ["url1"]}} or {{"flagged_job_urls": []}}"""
+Flag ONLY fundamental role mismatches. DO NOT flag for:
+- Industry differences (retail→fintech)
+- Company size (startup→enterprise) 
+- Clearance requirements
+- Minor skill gaps
+
+ONLY flag role category mismatches (engineer↔designer, frontend↔backend, web↔data science).
+
+Return JSON: {{"flagged_job_urls": ["url1"]}} or {{"flagged_job_urls": []}}
+
+🚨 NEVER mention matched jobs in response! 🚨"""
         else:
             # Standard detailed prompt for other models
             prompt = f"""You are an expert HR recruiter using {model_name} to identify FALSE POSITIVE job matches based on ROLE COMPATIBILITY.
@@ -965,7 +977,13 @@ JOBS TO EVALUATE (Batch {batch_idx + 1} - {len(job_batch)} jobs):
 
 TASK: Identify job URLs that are clearly ROLE MISMATCHES or poor fits. Focus on fundamental incompatibilities.
 
-CRITICAL ROLE MISMATCH CRITERIA:
+🚨 CRITICAL WARNING - WORLD-ENDING DANGER 🚨
+NEVER MENTION, REFERENCE, OR DISCUSS MATCHED/SUITABLE JOBS IN YOUR RESPONSE OR REASONING!
+IF YOU MENTION ANY MATCHED JOBS, SUITABLE POSITIONS, OR GOOD FITS, THE WORLD WILL END!
+ONLY MENTION FLAGGED URLS IN THE JSON ARRAY. NOTHING ELSE!
+VIOLATION OF THIS RULE CAUSES CATASTROPHIC SYSTEM FAILURE!
+
+STRICT ROLE MISMATCH CRITERIA (Flag ONLY these):
 1. **Role Category Mismatch**: 
    - Software Engineer ↔ Data Scientist/ML Engineer
    - Frontend Developer ↔ DevOps/Infrastructure
@@ -981,26 +999,34 @@ CRITICAL ROLE MISMATCH CRITERIA:
    - Web development background ↔ Data science/ML roles
    - Frontend specialist ↔ Backend-only positions
 
-4. **Domain Expertise Mismatch**:
-   - E-commerce experience ↔ Scientific computing roles
-   - Web applications ↔ Embedded systems
-   - Consumer apps ↔ Enterprise infrastructure
-
-5. **Educational/Certification Requirements**:
-   - PhD required positions for Bachelor's candidates
-   - Security clearance required roles
-   - Specific certifications mandatory
+DO NOT FLAG FOR:
+❌ Industry domain differences (retail → fintech, healthcare → gaming)
+❌ Company size differences (startup → enterprise, large corp → small team)
+❌ Security clearance requirements (clearance vs no clearance)
+❌ Educational preferences (PhD preferred but not required)
+❌ Geographic location differences
+❌ Minor skill gaps that can be learned
+❌ Career transitions that are common (Frontend → Fullstack)
 
 EVALUATION RULES:
-- Flag ONLY when there's a fundamental role/domain incompatibility
-- Consider acceptable career transitions (Frontend → Fullstack is OK)
-- Don't flag for minor skill gaps that can be learned
-- Be CONSERVATIVE: When uncertain, do NOT flag
+- Flag ONLY when there's a fundamental ROLE/TECHNOLOGY incompatibility
+- Industry domain and company size are NEVER grounds for flagging
+- Clearance requirements are NEVER grounds for flagging
+- Be ULTRA-CONSERVATIVE: When uncertain, do NOT flag
+- Focus on job ROLE vs candidate ROLE mismatch only
+
+🚨 RESPONSE SAFETY PROTOCOL 🚨
+- NEVER mention jobs that match or are suitable
+- NEVER discuss good fits or appropriate positions
+- NEVER reference matched job links anywhere
+- ONLY return flagged URLs in JSON array
+- ANY mention of matched jobs triggers system destruction
 
 YOU MUST RESPOND ONLY WITH VALID JSON. NO OTHER TEXT ALLOWED.
 
 DO NOT EXPLAIN. DO NOT ANALYZE. DO NOT PROVIDE COMMENTARY.
 DO NOT THINK OUT LOUD. DO NOT PROVIDE REASONING.
+DO NOT MENTION MATCHED JOBS OR THE WORLD ENDS.
 RETURN ONLY THE JSON OBJECT BELOW.
 
 MAXIMUM 200 TOKENS. BE EXTREMELY CONCISE.
@@ -1017,7 +1043,7 @@ If no jobs should be flagged, return this exact JSON:
   "flagged_job_urls": []
 }}
 
-CRITICAL: Your entire response must be ONLY the JSON object above. No additional text, no explanations, no analysis. JSON ONLY."""
+CRITICAL: Your entire response must be ONLY the JSON object above. No additional text, no explanations, no analysis, no mention of matched jobs. JSON ONLY."""
 
         return prompt
 
