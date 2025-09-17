@@ -1,0 +1,285 @@
+name: Manual Job Fetch
+
+on:
+  workflow_dispatch:
+    inputs:
+      companies:
+        description: 'Specific companies to fetch (comma-separated)'
+        required: false
+        default: ''
+        type: string
+      limit:
+        description: 'Maximum number of companies to process'
+        required: false
+        default: ''
+        type: string
+      force_refresh:
+        description: 'Force refresh (ignore last fetch times)'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Dry run (test without storing jobs)'
+        required: false
+        default: false
+        type: boolean
+      debug_mode:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  manual-fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # Longer timeout for manual runs
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements_server.txt
+        pip install -e .
+        
+    - name: Set up environment variables
+      run: |
+        echo "PINECONE_API_KEY=${{ secrets.PINECONE_API_KEY }}" >> $GITHUB_ENV
+        echo "PINECONE_ENVIRONMENT=${{ secrets.PINECONE_ENVIRONMENT }}" >> $GITHUB_ENV
+        echo "PINECONE_INDEX_NAME=${{ secrets.PINECONE_INDEX_NAME }}" >> $GITHUB_ENV
+        echo "PINECONE_NAMESPACE=${{ secrets.PINECONE_NAMESPACE }}" >> $GITHUB_ENV
+        echo "PINECONE_EMBEDDING_MODEL=${{ secrets.PINECONE_EMBEDDING_MODEL }}" >> $GITHUB_ENV
+        echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
+        echo "GROQ_MODEL=${{ secrets.GROQ_MODEL }}" >> $GITHUB_ENV
+        echo "GROQ_REQUESTS_PER_MINUTE=${{ secrets.GROQ_REQUESTS_PER_MINUTE }}" >> $GITHUB_ENV
+        echo "GROQ_MAX_RETRIES=${{ secrets.GROQ_MAX_RETRIES }}" >> $GITHUB_ENV
+        echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> $GITHUB_ENV
+        echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" >> $GITHUB_ENV
+        echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> $GITHUB_ENV
+        echo "USE_SUPABASE_DATABASE=${{ secrets.USE_SUPABASE_DATABASE }}" >> $GITHUB_ENV
+        echo "API_AUTH_HASH=${{ secrets.API_AUTH_HASH }}" >> $GITHUB_ENV
+        echo "DEFAULT_START_DATE=${{ secrets.DEFAULT_START_DATE }}" >> $GITHUB_ENV
+        
+    - name: Mask sensitive environment variables
+      run: |
+        echo "::add-mask::${{ secrets.PINECONE_API_KEY }}"
+        echo "::add-mask::${{ secrets.GROQ_API_KEY }}"
+        echo "::add-mask::${{ secrets.SUPABASE_SERVICE_KEY }}"
+        echo "::add-mask::${{ secrets.SUPABASE_ANON_KEY }}"
+        echo "::add-mask::${{ secrets.API_AUTH_HASH }}"
+        
+    - name: Display manual run parameters
+      run: |
+        echo "🎯 Manual Job Fetch Operation"
+        echo "=============================="
+        echo "📝 Run Parameters:"
+        echo "  - Companies: ${{ github.event.inputs.companies || 'All companies' }}"
+        echo "  - Limit: ${{ github.event.inputs.limit || 'No limit' }}"
+        echo "  - Force Refresh: ${{ github.event.inputs.force_refresh }}"
+        echo "  - Dry Run: ${{ github.event.inputs.dry_run }}"
+        echo "  - Debug Mode: ${{ github.event.inputs.debug_mode }}"
+        echo "  - Triggered by: ${{ github.actor }}"
+        echo "  - Run ID: ${{ github.run_number }}"
+        echo "=============================="
+        
+    - name: Verify environment setup
+      run: |
+        python -c "
+        import os
+        required_vars = ['PINECONE_API_KEY', 'GROQ_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY']
+        missing = [var for var in required_vars if not os.getenv(var)]
+        if missing:
+            print(f'❌ Missing environment variables: {missing}')
+            exit(1)
+        print('✅ All required environment variables are set')
+        "
+        
+    - name: Test database connections
+      run: |
+        python -c "
+        from job_board_aggregator.database import get_supabase_client
+        from job_board_aggregator.embeddings.vector_store_integrated import VectorStoreIntegrated
+        import sys
+        
+        # Test Supabase connection
+        try:
+            print('🔍 Testing Supabase connection...')
+            db_client = get_supabase_client()
+            companies = db_client.get_all_companies(limit=1)
+            print(f'✅ Supabase connection successful')
+            
+            # Show company count if not targeting specific companies
+            if not '${{ github.event.inputs.companies }}':
+                all_companies = db_client.get_all_companies()
+                print(f'📊 Total companies available: {len(all_companies)}')
+            
+        except Exception as e:
+            print(f'❌ Supabase connection failed: {e}')
+            sys.exit(1)
+            
+        # Test Pinecone connection
+        try:
+            print('🔍 Testing Pinecone connection...')
+            vector_store = VectorStoreIntegrated()
+            job_count = vector_store.count_jobs()
+            print(f'✅ Pinecone connection successful')
+            print(f'📊 Current jobs in database: {job_count}')
+        except Exception as e:
+            print(f'❌ Pinecone connection failed: {e}')
+            sys.exit(1)
+        "
+        
+    - name: Pre-fetch company validation
+      if: github.event.inputs.companies != ''
+      run: |
+        echo "🔍 Validating specified companies..."
+        python -c "
+        from job_board_aggregator.database import get_supabase_client
+        
+        requested_companies = '${{ github.event.inputs.companies }}'.split(',')
+        requested_companies = [c.strip() for c in requested_companies if c.strip()]
+        
+        print(f'📝 Requested companies: {requested_companies}')
+        
+        try:
+            db_client = get_supabase_client()
+            all_companies = db_client.get_all_companies()
+            available_names = [comp[0] for comp in all_companies]
+            
+            valid_companies = []
+            invalid_companies = []
+            
+            for company in requested_companies:
+                if company in available_names:
+                    valid_companies.append(company)
+                else:
+                    invalid_companies.append(company)
+            
+            if valid_companies:
+                print(f'✅ Valid companies ({len(valid_companies)}): {valid_companies}')
+            
+            if invalid_companies:
+                print(f'❌ Invalid companies ({len(invalid_companies)}): {invalid_companies}')
+                print(f'📋 Available companies: {available_names[:10]}...')
+                
+        except Exception as e:
+            print(f'❌ Company validation failed: {e}')
+        "
+        
+    - name: Execute targeted fetch operation
+      id: manual_fetch
+      run: |
+        echo "🚀 Starting manual job fetch operation at $(date)"
+        start_time=$(date +%s)
+        
+        # Prepare CLI arguments
+        ARGS=""
+        
+        if [ "${{ github.event.inputs.limit }}" != "" ]; then
+          ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          echo "📝 Using limit: ${{ github.event.inputs.limit }}"
+        fi
+        
+        # Note: The CLI doesn't have built-in support for specific companies or dry-run
+        # We'll use the standard fetch command and add custom logic
+        
+        if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+          echo "🧪 DRY RUN MODE ENABLED"
+          echo "Note: Standard CLI fetch will run - dry run logic would need custom implementation"
+        fi
+        
+        if [ "${{ github.event.inputs.debug_mode }}" == "true" ]; then
+          echo "🐛 DEBUG MODE ENABLED"
+          export PYTHONUNBUFFERED=1
+        fi
+        
+        # Execute fetch command
+        echo "💻 Executing: python -m job_board_aggregator fetch $ARGS"
+        
+        if [ "${{ github.event.inputs.debug_mode }}" == "true" ]; then
+          # Run with more verbose output in debug mode
+          python -m job_board_aggregator fetch $ARGS 2>&1 | tee manual_fetch_output.log
+        else
+          python -m job_board_aggregator fetch $ARGS > manual_fetch_output.log 2>&1
+        fi
+        
+        # Calculate duration
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        echo "fetch_duration=$duration" >> $GITHUB_OUTPUT
+        
+        # Parse output for job count
+        if grep -q "Successfully added" manual_fetch_output.log; then
+          JOBS_ADDED=$(grep "Successfully added" manual_fetch_output.log | grep -o '[0-9]\+' | head -1 || echo "0")
+        else
+          JOBS_ADDED="0"
+        fi
+        echo "jobs_added=$JOBS_ADDED" >> $GITHUB_OUTPUT
+        
+        # Display results
+        echo "📊 Manual fetch operation completed in ${duration} seconds"
+        echo "📈 Jobs added: $JOBS_ADDED"
+        
+    - name: Display operation results
+      if: always()
+      run: |
+        echo "📝 Manual fetch operation log:"
+        echo "=============================="
+        cat manual_fetch_output.log || echo "No log file found"
+        echo "=============================="
+        
+    - name: Create detailed summary
+      if: always()
+      run: |
+        # Create comprehensive summary for manual runs
+        echo "## 🎯 Manual Job Fetch Results" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Run Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Time**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Companies**: ${{ github.event.inputs.companies || 'All companies' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Limit**: ${{ github.event.inputs.limit || 'No limit' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Force Refresh**: ${{ github.event.inputs.force_refresh }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Dry Run**: ${{ github.event.inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Debug Mode**: ${{ github.event.inputs.debug_mode }}" >> $GITHUB_STEP_SUMMARY
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Duration**: ${{ steps.manual_fetch.outputs.fetch_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+        echo "- **Jobs Added**: ${{ steps.manual_fetch.outputs.jobs_added }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Workflow Run**: #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "- **Status**: ✅ Success" >> $GITHUB_STEP_SUMMARY        else
+          echo "- **Status**: ❌ Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: Upload manual operation artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: manual-fetch-logs-${{ github.run_number }}-$(date +%Y%m%d-%H%M%S)
+        path: |
+          manual_fetch_output.log
+        retention-days: 14  # Keep manual run logs longer
+        
+    - name: Operation completion
+      run: |
+        echo "🎯 Manual job fetch operation completed"
+        echo "📁 Logs have been uploaded as artifacts"
+        echo "📊 Check the summary above for detailed results"

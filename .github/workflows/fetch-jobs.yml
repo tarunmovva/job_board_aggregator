@@ -1,0 +1,232 @@
+﻿name: Automated Job Fetching
+
+# This workflow is optimized for SPEED by installing only minimal dependencies required 
+# for the fetch operation. It excludes server components (FastAPI, uvicorn), 
+# resume parsing (pdfminer.six, python-docx), and UI libraries (rich).
+
+on:
+  schedule:
+    # Run every 40 minutes
+    - cron: '*/40 * * * *'
+  workflow_dispatch:  # Allow manual triggers
+
+jobs:
+  fetch-jobs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35  # Safety timeout before next run
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-fetch-${{ hashFiles('**/requirements_fetch_only.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-fetch-
+          
+    - name: Install minimal dependencies for fetch operation
+      run: |
+        python -m pip install --upgrade pip
+        # Install only minimal dependencies needed for fetch operation
+        # Excludes: FastAPI, uvicorn, python-multipart, rich, pdfminer.six, python-docx
+        pip install -r requirements_fetch_only.txt
+        # Install package without dependencies to avoid pulling server requirements
+        pip install -e . --no-deps
+        
+    - name: Set up environment variables
+      run: |
+        echo "PINECONE_API_KEY=${{ secrets.PINECONE_API_KEY }}" >> $GITHUB_ENV
+        echo "PINECONE_ENVIRONMENT=${{ secrets.PINECONE_ENVIRONMENT }}" >> $GITHUB_ENV
+        echo "PINECONE_INDEX_NAME=${{ secrets.PINECONE_INDEX_NAME }}" >> $GITHUB_ENV
+        echo "PINECONE_NAMESPACE=${{ secrets.PINECONE_NAMESPACE }}" >> $GITHUB_ENV
+        echo "PINECONE_EMBEDDING_MODEL=${{ secrets.PINECONE_EMBEDDING_MODEL }}" >> $GITHUB_ENV
+        echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
+        echo "GROQ_MODEL=${{ secrets.GROQ_MODEL }}" >> $GITHUB_ENV
+        echo "GROQ_REQUESTS_PER_MINUTE=${{ secrets.GROQ_REQUESTS_PER_MINUTE }}" >> $GITHUB_ENV
+        echo "GROQ_MAX_RETRIES=${{ secrets.GROQ_MAX_RETRIES }}" >> $GITHUB_ENV
+        echo "GROQ_MODEL_ROTATION_ENABLED=${{ secrets.GROQ_MODEL_ROTATION_ENABLED }}" >> $GITHUB_ENV
+        echo "GROQ_MODELS=${{ secrets.GROQ_MODELS }}" >> $GITHUB_ENV
+        echo "GROQ_LFU_WINDOW_MINUTES=${{ secrets.GROQ_LFU_WINDOW_MINUTES }}" >> $GITHUB_ENV
+        echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> $GITHUB_ENV
+        echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" >> $GITHUB_ENV
+        echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> $GITHUB_ENV
+        echo "USE_SUPABASE_DATABASE=${{ secrets.USE_SUPABASE_DATABASE }}" >> $GITHUB_ENV
+        echo "API_AUTH_HASH=${{ secrets.API_AUTH_HASH }}" >> $GITHUB_ENV
+        echo "DEFAULT_START_DATE=${{ secrets.DEFAULT_START_DATE }}" >> $GITHUB_ENV
+        
+    - name: Mask sensitive environment variables
+      run: |
+        echo "::add-mask::${{ secrets.PINECONE_API_KEY }}"
+        echo "::add-mask::${{ secrets.GROQ_API_KEY }}"
+        echo "::add-mask::${{ secrets.SUPABASE_SERVICE_KEY }}"
+        echo "::add-mask::${{ secrets.SUPABASE_ANON_KEY }}"
+        echo "::add-mask::${{ secrets.API_AUTH_HASH }}"
+        
+    - name: Verify environment setup
+      run: |
+        python -c "
+        import os
+        required_vars = ['PINECONE_API_KEY', 'GROQ_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY']
+        missing = [var for var in required_vars if not os.getenv(var)]
+        if missing:
+            print(f'❌ Missing environment variables: {missing}')
+            exit(1)
+        print('✅ All required environment variables are set')
+        
+        # Show configuration (masked)
+        print(f'📌 PINECONE_ENVIRONMENT: {os.getenv(\"PINECONE_ENVIRONMENT\")}')
+        print(f'📊 PINECONE_INDEX_NAME: {os.getenv(\"PINECONE_INDEX_NAME\")}')       
+        print(f'🧠 GROQ_MODEL: {os.getenv(\"GROQ_MODEL\")}')
+        print(f'🌐 SUPABASE_URL: {os.getenv(\"SUPABASE_URL\")}')
+        print(f'🗃️ USE_SUPABASE_DATABASE: {os.getenv(\"USE_SUPABASE_DATABASE\")}')
+        "
+        
+    - name: Test database connections
+      run: |
+        python -c "
+        from job_board_aggregator.database import get_supabase_client
+        from job_board_aggregator.embeddings.vector_store_integrated import VectorStoreIntegrated
+        import sys
+        
+        # Test Supabase connection
+        try:
+            print('🔍 Testing Supabase connection...')
+            db_client = get_supabase_client()
+            companies = db_client.get_all_companies(limit=1)
+            print(f'✅ Supabase connection successful, {len(companies)} companies available')
+        except Exception as e:
+            print(f'❌ Supabase connection failed: {e}')
+            sys.exit(1)
+            
+        # Test Pinecone connection
+        try:
+            print('🔍 Testing Pinecone connection...')
+            vector_store = VectorStoreIntegrated()
+            job_count = vector_store.count_jobs()
+            print(f'✅ Pinecone connection successful, {job_count} jobs in database')
+        except Exception as e:
+            print(f'❌ Pinecone connection failed: {e}')
+            sys.exit(1)
+        "
+        
+    - name: Execute job fetch operation
+      id: fetch_jobs
+      run: |
+        echo "🚀 Starting job fetch operation at $(date)"
+        echo "🐛 DEBUG MODE ENABLED (default for automatic fetch)"
+        export PYTHONUNBUFFERED=1
+        start_time=$(date +%s)
+        
+        # Execute fetch command using CLI interface (limit set to total number of companies in database)
+        echo "💻 Executing: python -m job_board_aggregator fetch --limit 367"
+        # Run with verbose output in debug mode using tee for real-time display and logging
+        python -m job_board_aggregator fetch --limit 367 2>&1 | tee fetch_output.log
+        
+        # Calculate duration
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        echo "fetch_duration=$duration" >> $GITHUB_OUTPUT
+        
+        # Parse output for job count
+        if grep -q "Successfully added" fetch_output.log; then
+          JOBS_ADDED=$(grep "Successfully added" fetch_output.log | grep -o '[0-9]\+' | head -1 || echo "0")
+        else
+          JOBS_ADDED="0"
+        fi
+        echo "jobs_added=$JOBS_ADDED" >> $GITHUB_OUTPUT
+        
+        # Display results
+        echo "📊 Fetch operation completed in ${duration} seconds"
+        echo "📈 Jobs added: $JOBS_ADDED"
+        
+        # Check for any errors in the log
+        if grep -i "error\|failed\|exception" fetch_output.log > /dev/null; then
+          echo "⚠️ Potential issues detected in fetch operation"
+          echo "error_detected=true" >> $GITHUB_OUTPUT
+        else
+          echo "error_detected=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Display fetch operation logs
+      if: always()
+      run: |
+        echo "📝 Full operation log:"
+        echo "===================="
+        cat fetch_output.log || echo "No log file found"
+        echo "===================="
+        
+    - name: Post-fetch health check
+      if: success()
+      run: |
+        python -c "
+        from job_board_aggregator.embeddings.vector_store_integrated import VectorStoreIntegrated
+        
+        try:
+            vector_store = VectorStoreIntegrated()
+            job_count = vector_store.count_jobs()
+            print(f'📊 Total jobs in database after fetch: {job_count}')
+            
+            # Basic health check
+            if job_count > 0:
+                print('✅ Database health check passed')
+            else:
+                print('⚠️ Warning: No jobs found in database')
+        except Exception as e:
+            print(f'❌ Post-fetch health check failed: {e}')
+        "
+        
+    - name: Create operation summary
+      if: always()
+      run: |
+        # Create summary for GitHub Actions summary
+        echo "## 🔄 Automated Job Fetch Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Time**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Duration**: ${{ steps.fetch_jobs.outputs.fetch_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+        echo "- **Jobs Added**: ${{ steps.fetch_jobs.outputs.jobs_added }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Workflow Run**: #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.fetch_jobs.outputs.error_detected }}" == "true" ]; then
+          echo "- **Status**: ⚠️ Completed with warnings" >> $GITHUB_STEP_SUMMARY
+          echo "- **Note**: Check logs for details" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Status**: ✅ Success" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Add performance metrics
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📈 Performance Metrics" >> $GITHUB_STEP_SUMMARY
+        echo "- **Jobs per minute**: $(echo "scale=2; ${{ steps.fetch_jobs.outputs.jobs_added }} / (${{ steps.fetch_jobs.outputs.fetch_duration }} / 60)" | bc -l 2>/dev/null || echo "N/A")" >> $GITHUB_STEP_SUMMARY
+        
+    - name: Upload operation logs and artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: fetch-logs-${{ github.run_number }}-$(date +%Y%m%d-%H%M%S)
+        path: |
+          fetch_output.log
+        retention-days: 7
+        
+    - name: Handle fetch errors
+      if: failure()
+      run: |
+        echo "❌ Job fetch operation failed"
+        echo "## ❌ Automated Job Fetch Failed" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Time**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ❌ Failed" >> $GITHUB_STEP_SUMMARY
+        echo "- **Logs**: Check the uploaded artifacts for details" >> $GITHUB_STEP_SUMMARY
+        echo "- **Workflow Run**: #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        
+        # Show last few lines of log for quick debugging
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔍 Error Details" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        tail -10 fetch_output.log 2>/dev/null || echo "No log file available" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
